@@ -550,6 +550,22 @@ class SettingsTests(Base):
         self.assertEqual(engine._spoken_text("Voir [doc](https://x.y)\nMEDIA:/tmp/a.png\nfin"), "Voir doc\nfin")
 
 
+    async def test_effort_switches_model_variant(self):
+        models = [("gemini-3.8-flash-high", "Flash (High)"), ("gemini-3.8-flash-low", "Flash (Low)"),
+                  ("gemini-3.1-pro-high", "Pro (High)"), ("claude-opus-4-6-thinking", "Opus")]
+        plugin._models_cache.update(at=time.time(), models=models)
+        try:
+            self.assertIsNone(await plugin._cmd_effort(""))  # picker
+            choices = self.adapter.sent("picker")[0][2]
+            self.assertEqual([(c["label"], c["is_current"]) for c in choices], [("high", True), ("low", False)])
+            self.assertEqual(await plugin._cmd_effort("low"), "agy model → gemini-3.8-flash-low")
+            self.assertIn("No max effort", await plugin._cmd_effort("max"))
+            store.update(model="claude-opus-4-6-thinking")
+            self.assertIn("no effort variants", await plugin._cmd_effort("low"))
+        finally:
+            plugin._models_cache.update(at=0.0, models=[])
+
+
 class AgentTests(Base):
     async def test_handoff_seeds_a_new_conversation(self):
         store.update(conversation_id="old")

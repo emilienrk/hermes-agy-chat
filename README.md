@@ -37,6 +37,7 @@ are queued and handed over together.
 | `/agy_new [message]` | New agy conversation |
 | `/agy_stop` | Stop the running turn and drop the queue (`/stop` too, in agy mode) |
 | `/agy_model [n or name]` | Pick agy's model |
+| `/agy_effort [low\|medium\|high]` | Reasoning effort: switches to that variant of the current model (`gemini-3.8-flash-high` → `-low`) |
 | `/agy_verbose [on\|off]` | Live status of agy's actions, or just its answer |
 | `/agy_voice [direct\|local]` | Voice notes as audio for agy, or transcribed locally |
 | `/agy_voice reply [off\|mirror\|always]` | agy's answer as a voice note too (mirror: when you sent one) |

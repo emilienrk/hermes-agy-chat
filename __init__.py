@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 MODELS_TTL_S = 3600
 INLINE_DOC_MAX_BYTES = 100 * 1024
 _SLASH = re.compile(r"^/([A-Za-z0-9_-]+)(?:@\w+)?(?=\s|$)")
+# agy encodes the reasoning effort in the model id (gemini-3.8-flash-high); its --effort flag
+# conflicts with those ids, so /agy_effort switches to a sibling variant instead.
+_EFFORT_SUFFIX = re.compile(r"-(low|medium|high|xhigh|max)$")
 _HERMES_WORD = re.compile(r"^\s*herm[eè]s(?=$|[\s,:;.!?])", re.I)
 
 HANDOFF_THREAD_MESSAGES = 30
@@ -51,6 +54,7 @@ def register(ctx):
         ("agy-new", _cmd_new, "New agy conversation", "[message]"),
         ("agy-stop", _cmd_stop, "Stop agy and drop its queue", ""),
         ("agy-model", _cmd_model, "Choose agy's model", "[number or name]"),
+        ("agy-effort", _cmd_effort, "agy's reasoning effort (model variant)", "[low|medium|high]"),
         ("agy-verbose", _cmd_verbose, "Show/hide agy's actions", "[on|off]"),
         ("agy-voice", _cmd_voice, "Voice notes in, and voice replies", "[direct|local|reply off|mirror|always]"),
         ("agy-conv", _cmd_conv, "Resume an agy conversation", "[number]"),
@@ -215,7 +219,7 @@ def _status_card():
         if snap["queued"]:
             busy += f" · {snap['queued']} queued"
         lines.append(busy)
-    lines.append("\n/agy_on · /agy_off · /agy_new · /agy_stop · /agy_model · /agy_verbose · /agy_voice · /agy_conv · "
+    lines.append("\n/agy_on · /agy_off · /agy_new · /agy_stop · /agy_model · /agy_effort · /agy_verbose · /agy_voice · /agy_conv · "
                  "/agy_retry · /agy_handoff · /agy_back · /agy_task · /agy_usage · /agy_doctor")
     return "\n".join(lines)
 
@@ -280,6 +284,32 @@ async def _cmd_model(raw_args: str):
         return f"Unknown model: {choice}\n/agy_model to see the list."
     store.update(model=choice)
     return f"agy model → {choice}" + ("" if models else "\n⚠️ List unavailable: name not checked.")
+
+
+async def _cmd_effort(raw_args: str):
+    choice = raw_args.strip().lower()
+    current = store.model(store.load())
+    variants = _effort_variants(current, [name for name, _ in await asyncio.to_thread(_list_models)])
+    if not variants:
+        return f"{current} has no effort variants (/agy_model to pick another model)."
+    level = _EFFORT_SUFFIX.search(current).group(1)
+    if not choice:
+        if await _picker("agy's reasoning effort:", [
+                {"value": model, "label": effort, "is_current": model == current}
+                for effort, model in variants.items()], _pick_model):
+            return None
+        return f"Effort: {level} ({current})\n/agy_effort {' | '.join(variants)}"
+    if choice not in variants:
+        return f"No {choice} effort for this model: {', '.join(variants)}."
+    return await _pick_model(None, variants[choice])
+
+
+def _effort_variants(model, models):
+    """{effort: model id} for the variants of ``model``'s family, in `agy models` order."""
+    if not _EFFORT_SUFFIX.search(model):
+        return {}
+    family = _EFFORT_SUFFIX.sub("", model)
+    return {m[len(family) + 1:]: m for m in models if _EFFORT_SUFFIX.sub("", m) == family and m != family}
 
 
 async def _pick_model(_chat_id, value):
