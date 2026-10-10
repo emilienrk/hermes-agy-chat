@@ -77,19 +77,20 @@ def verbose(state):
     return DEFAULT_VERBOSE if value is None else bool(value)
 
 
-def remember_agy_messages(ids):
-    """Record Telegram message ids sent as agy, so a reply to one of them reaches agy."""
+def remember_agy_messages(ids, key="agy_msgs"):
+    """Record Telegram message ids sent as agy (key: agy_msgs, or btw_msgs for the side conversation),
+    so a reply to one of them reaches the same conversation."""
     ids = [str(i) for i in ids if i]
     if not ids:
         return
     with _lock:
         state = load()
-        state["agy_msgs"] = (state.get("agy_msgs", []) + ids)[-AGY_MSGS_KEEP:]
+        state[key] = (state.get(key, []) + ids)[-AGY_MSGS_KEEP:]
         _save(state)
 
 
-def is_agy_message(state, message_id):
-    return message_id is not None and str(message_id) in state.get("agy_msgs", ())
+def is_agy_message(state, message_id, key="agy_msgs"):
+    return message_id is not None and str(message_id) in state.get(key, ())
 
 
 def log_turn(entry):
@@ -128,7 +129,7 @@ def conversations(limit=8):
     convs = {}
     for order, turn in enumerate(recent_turns()):
         cid = turn.get("conversation_id")
-        if not cid:
+        if not cid or turn.get("btw"):
             continue
         conv = convs.setdefault(cid, {"id": cid, "first": turn.get("message") or "", "turns": 0})
         conv.update(last=turn.get("at") or "", order=order)

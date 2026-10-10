@@ -43,6 +43,7 @@ are queued and handed over together.
 | `/agy_voice reply [off\|mirror\|always]` | agy's answer as a voice note too (mirror: when you sent one) |
 | `/agy_conv [n]` | Resume a past conversation |
 | `/agy_retry` | Send your last message again |
+| `/agy_btw <question>` | Side question, answered right away even while agy works, in its own conversation (seeded with the main one's last exchanges, on the model's `low` variant). Reply to its answer to keep that side conversation going |
 | `/agy_handoff [message]` | Hand the Hermes conversation over to agy (agy mode on, seeded with the thread) |
 | `/agy_back [message]` | Back to Hermes, which gets a recap of the agy conversation |
 | `/agy_task` | List agy's scheduled tasks; `add <when> \| <prompt>`, `rm <n>`, `run <n>` |

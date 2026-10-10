@@ -139,7 +139,7 @@ class Base(unittest.IsolatedAsyncioTestCase):
         self.adapter = FakeAdapter()
         engine._rt.update(adapter=self.adapter, gateway=None, loop=asyncio.get_running_loop(), notice_sent=False)
         engine._queue.clear()
-        engine._worker, engine._run = None, None
+        engine._worker, engine._run, engine._side_run, engine._side_lock = None, None, None, None
 
     async def asyncTearDown(self):
         if engine._worker and not engine._worker.done():
@@ -564,6 +564,53 @@ class SettingsTests(Base):
             self.assertIn("no effort variants", await plugin._cmd_effort("low"))
         finally:
             plugin._models_cache.update(at=0.0, models=[])
+
+
+class BtwTests(Base):
+    async def finish_btw(self, timeout=20):
+        for _ in range(int(timeout / 0.1)):
+            await asyncio.sleep(0.1)
+            tasks = [t for t in asyncio.all_tasks() if t.get_name() == "agy-chat-btw"]
+            if not tasks:
+                return
+        raise AssertionError("btw still running")
+
+    async def test_btw_runs_alongside_the_main_turn(self):
+        store.update(conversation_id="main-conv")
+        store.log_turn({"conversation_id": "main-conv", "message": "refactor the parser", "response": "on it"})
+        self.mode("verbose")  # the main turn takes ~9 s
+        await self.dispatch(event("/agy long job", msg_id="1"))
+        await asyncio.sleep(0.5)
+        self.mode("ok")
+        started = time.time()
+        result = await self.dispatch(event("/agy_btw quick one?", msg_id="2"))
+        self.assertEqual(result["action"], "skip")
+        await self.finish_btw()
+        self.assertLess(time.time() - started, 6)  # did not wait behind the main turn
+        self.assertTrue(engine.busy())
+        btw = [c for c in self.calls() if "Side question" in c["prompt"]][0]
+        self.assertIsNone(btw["conversation"])
+        self.assertIn("refactor the parser", btw["prompt"])
+        reply = [c for c in self.adapter.sent() if "ECHO:" in c[1]][-1]
+        self.assertIn("— 🛸 agy · btw", reply[1])
+        state = store.load()
+        self.assertEqual(state["conversation_id"], "main-conv")
+        self.assertTrue(store.is_agy_message(state, self.adapter.next_id, "btw_msgs"))
+        self.assertFalse(store.is_agy_message(state, self.adapter.next_id))
+        await self.finish(40)
+
+        # A reply to the btw answer continues the side conversation, not the main one.
+        btw_conv = store.load()["btw_conversation_id"]
+        btw_msg = next(i for i in store.load()["btw_msgs"])
+        await self.dispatch(event("and then?", msg_id="3", reply_to=btw_msg))
+        await self.finish_btw()
+        last = self.calls()[-1]
+        self.assertEqual(last["conversation"], btw_conv)
+        self.assertEqual(store.load()["conversation_id"], "main-conv")
+        self.assertEqual([c["id"] for c in store.conversations()], ["main-conv"])
+
+    async def test_btw_command_without_question(self):
+        self.assertIn("side question", await plugin._cmd_btw(""))
 
 
 class AgentTests(Base):

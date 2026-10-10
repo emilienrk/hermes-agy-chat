@@ -11,7 +11,7 @@ from . import engine, workspace
 TOKEN_FILE = Path.home() / ".gemini/antigravity-cli/antigravity-oauth-token"
 AGY_SETTINGS = Path.home() / ".gemini/antigravity-cli/settings.json"
 COMMANDS = ("agy", "agy_on", "agy_off", "agy_new", "agy_stop", "agy_model", "agy_effort", "agy_verbose", "agy_voice",
-            "agy_conv", "agy_retry", "agy_handoff", "agy_back", "agy_task", "agy_usage", "agy_doctor")
+            "agy_conv", "agy_retry", "agy_btw", "agy_handoff", "agy_back", "agy_task", "agy_usage", "agy_doctor")
 
 
 async def report():

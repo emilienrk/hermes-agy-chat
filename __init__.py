@@ -60,6 +60,7 @@ def register(ctx):
         ("agy-voice", _cmd_voice, "Voice notes in, and voice replies", "[direct|local|reply off|mirror|always]"),
         ("agy-conv", _cmd_conv, "Resume an agy conversation", "[number]"),
         ("agy-retry", _cmd_retry, "Send my last message to agy again", ""),
+        ("agy-btw", _cmd_btw, "Side question, answered now, next to the main conversation", "<question>"),
         ("agy-handoff", _cmd_handoff, "Hand the Hermes conversation over to agy", "[message]"),
         ("agy-back", _cmd_back, "Hand the agy conversation back to Hermes", "[message]"),
         ("agy-task", _cmd_task, "Tasks agy runs on a schedule", "[add <when> | <prompt> · rm n · run n]"),
@@ -113,11 +114,13 @@ async def _on_dispatch(event=None, gateway=None, **_kwargs):
 
 
 def route(event, state):
-    """("job", Job) | ("stop",) | ("new",) | ("handoff", text) | ("back", text) | None (Hermes' message)."""
+    """("job", Job) | ("btw", Job) | ("stop",) | ("new",) | ("handoff", text) | ("back", text) | None
+    (the message stays Hermes')."""
     media = [str(m) for m in (getattr(event, "media_urls", None) or [])]
     caption = caption_of(event.text or "", media)
     sticky = bool(state.get("sticky"))
     to_agy = store.is_agy_message(state, getattr(event, "reply_to_message_id", None))
+    to_btw = store.is_agy_message(state, getattr(event, "reply_to_message_id", None), "btw_msgs")
 
     command = _SLASH.match(caption)
     if command:
@@ -125,6 +128,8 @@ def route(event, state):
         rest = caption[command.end():]
         if name in ("agy", "agy-new") and (rest.strip() or media):
             return "job", _job(event, rest, media, to_agy, new=name == "agy-new")
+        if name == "agy-btw" and (rest.strip() or media):
+            return "btw", _job(event, rest, media, True, new=True, side=True)
         if name in ("agy-handoff", "agy-back"):
             return name[4:], rest.strip()
         if sticky and name == "stop" and engine.busy():
@@ -134,6 +139,8 @@ def route(event, state):
         return None
     if sticky and _HERMES_WORD.match(caption):
         return None
+    if to_btw:
+        return "btw", _job(event, caption, media, True, side=True)
     if to_agy or sticky:
         return "job", _job(event, caption, media, to_agy)
     return None
@@ -163,14 +170,14 @@ def _small_text(path):
         return ""
 
 
-def _job(event, text, media, to_agy, new=False):
+def _job(event, text, media, to_agy, new=False, side=False):
     kind = getattr(getattr(event, "message_type", None), "value", "")
     voice = media[:1] if kind == "voice" else []
     types = list(getattr(event, "media_types", None) or [])
     files = [(m, t or "") for m, t in zip_longest(media, types) if m and m not in voice]
     quoted = "" if to_agy else (getattr(event, "reply_to_text", None) or "")
     return engine.Job(text=text.strip(), files=files, voice=voice, message_id=getattr(event, "message_id", None),
-                      quoted=quoted, new_conversation=new)
+                      quoted=quoted, new_conversation=new, side=side)
 
 
 async def _act(decision, event):
@@ -179,6 +186,9 @@ async def _act(decision, event):
         await _handoff(decision[1], event.message_id)
     elif decision[0] == "back":
         return {"action": "rewrite", "text": await _hand_back(decision[1])}
+    elif decision[0] == "btw":
+        decision[1].model = await _btw_model()
+        engine.side(decision[1])
     elif decision[0] == "job":
         await engine.submit(decision[1])
     elif decision[0] == "stop":
@@ -221,7 +231,7 @@ def _status_card():
             busy += f" · {snap['queued']} queued"
         lines.append(busy)
     lines.append("\n/agy_on · /agy_off · /agy_new · /agy_stop · /agy_model · /agy_effort · /agy_verbose · /agy_voice · /agy_conv · "
-                 "/agy_retry · /agy_handoff · /agy_back · /agy_task · /agy_usage · /agy_doctor")
+                 "/agy_retry · /agy_btw · /agy_handoff · /agy_back · /agy_task · /agy_usage · /agy_doctor")
     return "\n".join(lines)
 
 
@@ -568,6 +578,22 @@ async def _picker(title, choices, on_selected):
         logger.exception("agy-chat: picker failed")
         return False
     return bool(getattr(result, "success", False))
+
+
+async def _cmd_btw(raw_args: str):
+    if not raw_args.strip():
+        return ("/agy_btw <question>: a side question, answered right away even while agy works, without "
+                "touching the main conversation. Reply to its answer to keep that side conversation going.")
+    # Normally taken by the dispatch hook; this is the fallback.
+    engine.side(engine.Job(text=raw_args.strip(), new_conversation=True, side=True, model=await _btw_model()))
+    return None
+
+
+async def _btw_model():
+    """The current model's low-effort variant when there is one: a side question wants speed."""
+    current = store.model(store.load())
+    models = [name for name, _ in await asyncio.to_thread(_list_models)]
+    return _effort_variants(current, models).get("low") or current
 
 
 async def _cmd_retry(_raw_args: str):

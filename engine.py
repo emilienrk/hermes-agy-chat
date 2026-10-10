@@ -38,6 +38,10 @@ SUMMARY_MAX_LINES = 12
 STATUS_ACTIONS = 5
 INBOX_KEEP_DAYS = 30
 RECAP_TURNS = 6
+BTW_RECAP_TURNS = 4
+BTW_HEAD = ("Side question (\"btw\"): {user} asks this alongside the main conversation, which another agy "
+            "may be working on right now: don't touch its work in progress. Recent exchanges of the main "
+            "conversation:\n{recap}\n\nAnswer briefly.\n\n")
 REACT_WORKING = "👀"
 REACT_QUEUED = "✍"
 MARK = "🛸"
@@ -73,13 +77,16 @@ class Job:
     message_id: str | None = None
     quoted: str = ""  # the message it replies to, when that one is not agy's
     new_conversation: bool = False
+    side: bool = False  # a btw message, for the side conversation
+    model: str = ""  # overrides the state's model
 
 
 class Run:
     """The live turn."""
 
-    def __init__(self, jobs, model):
-        self.jobs, self.model = jobs, model
+    def __init__(self, jobs, model, side=False):
+        self.jobs, self.model, self.side = jobs, model, side
+        self.conversation_id = None
         self.started = time.time()
         self.proc = None
         self.reset()
@@ -110,6 +117,8 @@ _rt = {"gateway": None, "adapter": None, "loop": None, "notice_sent": False}
 _queue = []
 _worker = None
 _run = None
+_side_run = None
+_side_lock = None
 
 
 def configure():
@@ -209,13 +218,15 @@ def stop():
         if job.message_id:
             asyncio.get_running_loop().create_task(react(job.message_id, None))
     _queue.clear()
-    run = _run
-    if run is None:
-        return False, dropped
-    run.stopped = True  # also covers a turn still transcribing, before agy starts
-    if run.proc is not None and run.proc.returncode is None:
-        _kill(run.proc)
-    return True, dropped
+    running = False
+    for run in (_run, _side_run):
+        if run is None:
+            continue
+        running = True
+        run.stopped = True  # also covers a turn still transcribing, before agy starts
+        if run.proc is not None and run.proc.returncode is None:
+            _kill(run.proc)
+    return running, dropped
 
 
 async def _drain():
@@ -406,7 +417,9 @@ async def _read_events(run, proc):
             continue
         kind = event.get("event")
         if kind == "init" and event.get("conversation_id"):
-            store.update(conversation_id=event["conversation_id"])
+            run.conversation_id = event["conversation_id"]
+            if not run.side:
+                store.update(conversation_id=run.conversation_id)
         elif kind == "step_update":
             track_step(run, event.get("step_update") or {})
         elif kind == "result":
@@ -496,7 +509,7 @@ def _summary(run):
     return "\n".join([head, *more, *shown])
 
 
-def _reply(run, verbose, notice=""):
+def _reply(run, verbose, notice="", label=""):
     """(text, attachments) for the final answer."""
     from gateway.platforms.base import BasePlatformAdapter
     result = run.result or {}
@@ -523,7 +536,8 @@ def _reply(run, verbose, notice=""):
         text += "\n\nLast actions:\n" + "\n".join(run.actions[-5:])
     footer = ""
     if cfg["footer"]:
-        parts = [f"{MARK} agy".strip(), *([run.model] if verbose else []), _elapsed(run.started)]
+        parts = [f"{MARK} agy".strip(), *([label] if label else []), *([run.model] if verbose else []),
+                 _elapsed(run.started)]
         footer = "— " + " · ".join(parts)
     if verbose and not run.status_msg and run.actions:  # turn too short for the live status message
         text += "\n\n" + _summary(run)
@@ -550,20 +564,21 @@ def clean(text):
     return "\n".join(lines).strip()
 
 
-async def deliver(text, attachments=(), reply_to=None):
-    """Send agy's answer and its files; every message sent is remembered as agy's."""
+async def deliver(text, attachments=(), reply_to=None, side=False):
+    """Send agy's answer and its files; every message sent is remembered as agy's (or the btw's)."""
     from gateway.platforms.base import BasePlatformAdapter
-    ids = await send(text, reply_to=reply_to) if text.strip() else []
+    ids = await send(text, reply_to=reply_to, side=side) if text.strip() else []
     ad = adapter()
     dropped = []  # same policy as Hermes' own sends: no secrets (.env, ssh keys…), no missing files
     safe = await asyncio.to_thread(BasePlatformAdapter.filter_media_delivery_paths,
                                    [(path, False) for path in attachments], "", dropped)
     for drop in dropped:
-        ids += await send(f"⚠️ File not sent ({drop['reason']}): {_home(drop['path'])}", reply_to=reply_to)
+        ids += await send(f"⚠️ File not sent ({drop['reason']}): {_home(drop['path'])}", reply_to=reply_to,
+                          side=side)
     for path, _voice in safe:
         p = Path(path)
         if ad is None:
-            ids += await send(f"MEDIA:{p}")
+            ids += await send(f"MEDIA:{p}", side=side)
             continue
         ext = p.suffix.lower()
         try:
@@ -584,12 +599,16 @@ async def deliver(text, attachments=(), reply_to=None):
         if res is not None and res.success:
             ids.append(res.message_id)
         else:
-            ids += await send(f"⚠️ Cannot send {p.name}: {error or '?'}", reply_to=reply_to)
-    store.remember_agy_messages(ids)
+            ids += await send(f"⚠️ Cannot send {p.name}: {error or '?'}", reply_to=reply_to, side=side)
+    _remember(ids, side)
     return ids
 
 
-async def send(text, reply_to=None):
+def _remember(ids, side=False):
+    store.remember_agy_messages(ids, key="btw_msgs" if side else "agy_msgs")
+
+
+async def send(text, reply_to=None, side=False):
     """Send a text message as agy; returns the Telegram message ids."""
     ad = adapter()
     if ad is not None:
@@ -597,7 +616,7 @@ async def send(text, reply_to=None):
             res = await ad.send(TARGET_CHAT, text, reply_to=reply_to)
             if res.success:
                 ids = [*getattr(res, "continuation_message_ids", ()), res.message_id]
-                store.remember_agy_messages(ids)
+                _remember(ids, side)
                 return [i for i in ids if i]
             logger.warning("agy-chat: adapter send failed: %s", res.error)
         except Exception:
@@ -669,6 +688,56 @@ async def react(message_id, emoji):
         await setter(TARGET_CHAT, message_id, emoji)
     except Exception:
         logger.debug("agy-chat: reaction failed", exc_info=True)
+
+
+# ── btw: a side conversation alongside the main one ──
+
+def side(job):
+    """Run a btw message now, next to the main turn and outside its queue (one btw at a time)."""
+    asyncio.get_running_loop().create_task(_side_turn(job), name="agy-chat-btw")
+
+
+async def _side_turn(job):
+    global _side_lock, _side_run
+    _side_lock = _side_lock or asyncio.Lock()
+    async with _side_lock:
+        try:
+            await _btw(job)
+        except Exception as e:
+            logger.exception("agy-chat: btw failed")
+            await send(f"❌ agy-chat btw: {e}", reply_to=job.message_id, side=True)
+        finally:
+            _side_run = None
+            if job.message_id:
+                await react(job.message_id, None)
+
+
+async def _btw(job):
+    global _side_run
+    state = store.load()
+    conv = None if job.new_conversation else state.get("btw_conversation_id")
+    run = _side_run = Run([job], job.model or store.model(state), side=True)
+    if job.message_id and REACT_WORKING:
+        await react(job.message_id, REACT_WORKING)
+    message, files = await _compose([job], False)
+    if not conv:
+        recap = await asyncio.to_thread(store.recap, state.get("conversation_id"), BTW_RECAP_TURNS, workspace.USER)
+        message = (f"{workspace.first_turn_preamble()}\n\n"
+                   + BTW_HEAD.format(user=workspace.USER, recap=recap or "(none)") + message)
+    typing = asyncio.get_running_loop().create_task(_typing_loop())
+    try:
+        await _exec(run, message, conv)
+    finally:
+        typing.cancel()
+    if run.conversation_id:
+        store.update(btw_conversation_id=run.conversation_id)
+    body, attachments = _reply(run, False, label="btw")
+    await deliver(body, attachments, job.message_id, side=True)
+    await asyncio.to_thread(store.log_turn, {
+        "btw": True, "model": run.model, "conversation_id": run.conversation_id, "message": message[-500:],
+        "response": ((run.result or {}).get("response") or "")[:2000],
+        "status": "STOPPED" if run.stopped else (run.result or {}).get("status", "NO_RESULT"),
+        "seconds": int(time.time() - run.started), "files": [p for p, _ in files], "tokens": run.tokens})
 
 
 # ── voice replies ──
