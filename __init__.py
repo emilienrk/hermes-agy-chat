@@ -22,10 +22,11 @@ import logging
 import re
 import subprocess
 import time
+from datetime import datetime, timedelta
 from itertools import zip_longest
 from pathlib import Path
 
-from . import engine, workspace
+from . import config, engine, workspace
 from . import state as store
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,9 @@ MODELS_TTL_S = 3600
 INLINE_DOC_MAX_BYTES = 100 * 1024
 _SLASH = re.compile(r"^/([A-Za-z0-9_-]+)(?:@\w+)?(?=\s|$)")
 _HERMES_WORD = re.compile(r"^\s*herm[eè]s(?=$|[\s,:;.!?])", re.I)
+
+HANDOFF_THREAD_MESSAGES = 30
+HANDBACK_TURNS = 8
 
 _models_cache = {"at": 0.0, "models": []}
 
@@ -48,9 +52,13 @@ def register(ctx):
         ("agy-stop", _cmd_stop, "Stop agy and drop its queue", ""),
         ("agy-model", _cmd_model, "Choose agy's model", "[number or name]"),
         ("agy-verbose", _cmd_verbose, "Show/hide agy's actions", "[on|off]"),
-        ("agy-voice", _cmd_voice, "Voice notes: straight to agy or local transcription", "[direct|local]"),
+        ("agy-voice", _cmd_voice, "Voice notes in, and voice replies", "[direct|local|reply off|mirror|always]"),
         ("agy-conv", _cmd_conv, "Resume an agy conversation", "[number]"),
         ("agy-retry", _cmd_retry, "Send my last message to agy again", ""),
+        ("agy-handoff", _cmd_handoff, "Hand the Hermes conversation over to agy", "[message]"),
+        ("agy-back", _cmd_back, "Hand the agy conversation back to Hermes", "[message]"),
+        ("agy-task", _cmd_task, "Tasks agy runs on a schedule", "[add <when> | <prompt> · rm n · run n]"),
+        ("agy-usage", _cmd_usage, "agy turns and tokens per day", ""),
         ("agy-doctor", _cmd_doctor, "Check the agy integration", ""),
     ):
         ctx.register_command(name, handler=handler, description=description, args_hint=hint)
@@ -60,14 +68,15 @@ def register(ctx):
 
 def configure(get):
     """Apply the plugin settings (plugins.entries.agy-chat.settings in config.yaml)."""
-    chat_id = str(get("chat_id", "") or "").strip()
-    if not chat_id:
+    cfg = config.load(get)
+    if not cfg["chat_id"]:
         logger.warning("agy-chat: no chat_id setting, nothing will be routed to agy "
                        "(hermes config set plugins.entries.agy-chat.settings.chat_id <telegram chat id>)")
-    engine.configure(chat_id, get("agy_path", ""))
-    workspace.configure(chat_id=chat_id, user=get("user_name", ""), workspace=get("workspace", ""),
-                        machine_notes=get("machine_notes", ""), skip_skills=get("skip_skills", []) or [])
-    store.DEFAULT_MODEL = get("default_model", "") or store.DEFAULT_MODEL
+    engine.configure()
+    workspace.configure()
+    store.DEFAULT_MODEL = cfg["default_model"] or store.DEFAULT_MODEL
+    store.DEFAULT_VOICE, store.DEFAULT_VOICE_REPLY = cfg["voice_input"], cfg["voice_reply"]
+    store.DEFAULT_VERBOSE = bool(cfg["verbose"])
 
 
 def _on_telegram_connect(_application, adapter):
@@ -92,15 +101,14 @@ async def _on_dispatch(event=None, gateway=None, **_kwargs):
         decision = route(event, store.load())
         if decision is None:
             return None
-        await _act(decision, event)
-        return {"action": "skip", "reason": "agy-chat"}
+        return await _act(decision, event) or {"action": "skip", "reason": "agy-chat"}
     except Exception:
         logger.exception("agy-chat: dispatch failed")
         return None
 
 
 def route(event, state):
-    """("job", Job) | ("stop",) | ("new",) | None (the message stays Hermes')."""
+    """("job", Job) | ("stop",) | ("new",) | ("handoff", text) | ("back", text) | None (Hermes' message)."""
     media = [str(m) for m in (getattr(event, "media_urls", None) or [])]
     caption = caption_of(event.text or "", media)
     sticky = bool(state.get("sticky"))
@@ -112,6 +120,8 @@ def route(event, state):
         rest = caption[command.end():]
         if name in ("agy", "agy-new") and (rest.strip() or media):
             return "job", _job(event, rest, media, to_agy, new=name == "agy-new")
+        if name in ("agy-handoff", "agy-back"):
+            return name[4:], rest.strip()
         if sticky and name == "stop" and engine.busy():
             return ("stop",)
         if sticky and name == "new":
@@ -159,7 +169,12 @@ def _job(event, text, media, to_agy, new=False):
 
 
 async def _act(decision, event):
-    if decision[0] == "job":
+    """Run a routing decision; a dict is the hook's answer instead of the default skip."""
+    if decision[0] == "handoff":
+        await _handoff(decision[1], event.message_id)
+    elif decision[0] == "back":
+        return {"action": "rewrite", "text": await _hand_back(decision[1])}
+    elif decision[0] == "job":
         await engine.submit(decision[1])
     elif decision[0] == "stop":
         await engine.send(_stop_text(), reply_to=event.message_id)
@@ -189,9 +204,10 @@ def _status_card():
     lines.append(f"Model: {store.model(state)}")
     conv = state.get("conversation_id")
     lines.append(f"Conversation: {conv[:8] + '…' if conv else 'new from the next message'}")
-    lines.append(f"Display: {'detailed' if state.get('verbose') else 'discreet'} (/agy_verbose)")
+    lines.append(f"Display: {'detailed' if store.verbose(state) else 'discreet'} (/agy_verbose)")
     vmode = store.voice_mode(state)
-    lines.append(f"Voice notes: {'straight to agy (Google)' if vmode == 'direct' else 'local transcription (Whisper)'} (/agy_voice)")
+    lines.append(f"Voice notes: {'straight to agy (Google)' if vmode == 'direct' else 'local transcription (Whisper)'}"
+                 f" · voice replies: {store.voice_reply(state)} (/agy_voice)")
     if snap["busy"]:
         busy = f"Running for {snap['elapsed']} · {snap['actions']} actions"
         if snap["current"]:
@@ -200,7 +216,7 @@ def _status_card():
             busy += f" · {snap['queued']} queued"
         lines.append(busy)
     lines.append("\n/agy_on · /agy_off · /agy_new · /agy_stop · /agy_model · /agy_verbose · /agy_voice · /agy_conv · "
-                 "/agy_retry · /agy_doctor")
+                 "/agy_retry · /agy_handoff · /agy_back · /agy_task · /agy_usage · /agy_doctor")
     return "\n".join(lines)
 
 
@@ -208,8 +224,8 @@ async def _cmd_on(_raw_args: str):
     already = store.load().get("sticky")
     store.update(sticky=True)
     if await engine.set_mode_banner(True):
-        return "🛸 agy mode already on." if already else None
-    return engine.MODE_BANNER
+        return f"{engine.MARK} agy mode already on.".strip() if already else None
+    return engine.mode_banner()
 
 
 async def _cmd_off(_raw_args: str):
@@ -295,8 +311,8 @@ async def _cmd_verbose(raw_args: str):
     elif arg in ("off", "no", "0"):
         verbose = False
     else:
-        verbose = not store.load().get("verbose")
-    store.update(verbose=verbose or None)
+        verbose = not store.verbose(store.load())
+    store.update(verbose=verbose)
     if verbose:
         return "Detailed display: live status (actions, what agy writes) then a summary of the actions."
     return "Discreet display: \"typing…\" while agy works, then its answer only."
@@ -304,6 +320,8 @@ async def _cmd_verbose(raw_args: str):
 
 async def _cmd_voice(raw_args: str):
     arg = raw_args.strip().lower()
+    if arg.split()[:1] == ["reply"]:
+        return _voice_reply(arg.split()[1:])
     current = store.voice_mode(store.load())
     if arg in ("direct", "google", "agy"):
         mode = "direct"
@@ -317,6 +335,137 @@ async def _cmd_voice(raw_args: str):
     if mode == "direct":
         return "🎙 Voice notes → direct mode: the raw audio file goes to agy (Google)."
     return "🎙 Voice notes → local mode (Whisper transcription on this machine)."
+
+
+def _voice_reply(args):
+    if not args:
+        return (f"Voice replies: {store.voice_reply(store.load())}.\n"
+                "/agy_voice reply off · mirror (when you sent a voice note) · always")
+    if args[0] not in config.VOICE_REPLY_MODES:
+        return f"Invalid mode: `{args[0]}`. Use off, mirror or always."
+    store.update(voice_reply=args[0])
+    return {"off": "🔇 Voice replies off.",
+            "mirror": "🔊 agy answers your voice notes with a voice note too.",
+            "always": "🔊 agy also answers every message with a voice note."}[args[0]]
+
+
+# ── handoff ──
+
+async def _cmd_handoff(raw_args: str):
+    await _handoff(raw_args.strip())  # normally taken by the dispatch hook; this is the fallback
+    return None
+
+
+async def _handoff(message, reply_to=None):
+    """New agy conversation seeded with the Hermes thread, and agy mode on."""
+    thread = await asyncio.to_thread(workspace.hermes_thread, HANDOFF_THREAD_MESSAGES)
+    user = workspace.USER
+    text = (f"Hermes hands this conversation with {user} over to you. Recent thread between {user} and "
+            f"Hermes:\n{thread or '(empty)'}\n\n"
+            + (message or f"Pick up where Hermes left off: in a few lines, say where things stand and what "
+                          f"you will do next, then wait for {user}."))
+    store.update(sticky=True)
+    await engine.set_mode_banner(True)
+    await engine.submit(engine.Job(text=text, message_id=reply_to, new_conversation=True))
+
+
+async def _cmd_back(raw_args: str):
+    # Normally taken by the dispatch hook, which hands the recap to Hermes as the message itself.
+    await _hand_back("")
+    return "↩️ Back to Hermes."
+
+
+async def _hand_back(message):
+    """agy mode off; returns the message Hermes gets: the agy conversation's recap, then ``message``."""
+    state = store.load()
+    store.update(sticky=None)
+    await engine.set_mode_banner(False)
+    user = workspace.USER
+    recap = await asyncio.to_thread(store.recap, state.get("conversation_id"), HANDBACK_TURNS, user, 1200)
+    head = (f"[Handover from agy (Antigravity): {user} worked with agy and comes back to you. Their last "
+            f"exchanges:\n{recap or '(none)'}]\n\n")
+    return head + (message or "Take over from here: in a few lines, say where things stand and what's next.")
+
+
+# ── tasks ──
+
+async def _cmd_task(raw_args: str):
+    from . import tasks
+    verb, _, rest = raw_args.strip().partition(" ")
+    verb = verb.lower()
+    try:
+        if verb == "add":
+            when, sep, prompt = rest.partition("|")
+            if not sep or not when.strip() or not prompt.strip():
+                return ("Usage: /agy_task add <when> | <prompt>\n"
+                        "when: every day at 8am · every monday 9am · 0 7 * * 1-5 · in 2h · every 6h")
+            task = await asyncio.to_thread(tasks.create, when, prompt, task_settings())
+            return (f"⏰ agy task \"{task['name']}\" scheduled ({task['schedule']}"
+                    f"{', next ' + _when(task['next_run_at']) if task.get('next_run_at') else ''}).")
+        listed = await asyncio.to_thread(tasks.list_tasks)
+        if verb in ("rm", "run"):
+            if not rest.strip().isdigit() or not 1 <= int(rest) <= len(listed):
+                return f"Invalid number: 1 to {len(listed)}." if listed else "No agy task."
+            task = listed[int(rest) - 1]
+            if verb == "rm":
+                await asyncio.to_thread(tasks.remove, task["job_id"])
+                return f"🗑 agy task \"{task['name']}\" removed."
+            await asyncio.to_thread(tasks.run_now, task["job_id"])
+            return f"▶ agy task \"{task['name']}\" started: its answer will arrive here."
+    except Exception as e:
+        logger.exception("agy-chat: /agy_task failed")
+        return f"❌ agy task: {e}"
+    if not listed:
+        return ("No agy task. A task runs a prompt on agy on a schedule, free of Hermes' LLM:\n"
+                "/agy_task add every day at 8am | summarize my unread mails")
+    rows = [f"{i}. {t['name']} · {t['schedule']}"
+            + (f" · next {_when(t['next_run_at'])}" if t.get("next_run_at") else "")
+            + (f" · {t['state']}" if t.get("state") not in (None, "scheduled", "active") else "")
+            for i, t in enumerate(listed, 1)]
+    return ("agy tasks:\n" + "\n".join(rows)
+            + "\n\n/agy_task rm <n> · /agy_task run <n> · /agy_task add <when> | <prompt>")
+
+
+def task_settings():
+    """What a task's script needs to run agy outside the gateway."""
+    return {"agy_bin": engine.AGY_BIN, "workspace": str(workspace.WORKSPACE), "model": "",
+            "timeout_minutes": config.cfg["timeout_minutes"], "user": workspace.USER, "mark": engine.MARK,
+            "chat_id": engine.TARGET_CHAT}
+
+
+def _when(iso):
+    return str(iso or "")[:16].replace("T", " ")
+
+
+# ── usage ──
+
+async def _cmd_usage(_raw_args: str):
+    turns = await asyncio.to_thread(store.recent_turns)
+    if not turns:
+        return "No agy turn recorded."
+    today = datetime.now().date()
+    rows = []
+    for label, days in (("Today", 1), ("7 days", 7), ("30 days", 30)):
+        since = (today - timedelta(days=days - 1)).isoformat()
+        window = [t for t in turns if (t.get("at") or "") >= since]
+        if not window:
+            rows.append(f"{label}: nothing")
+            continue
+        tokens = sum(int(t.get("tokens") or 0) for t in window)
+        minutes = sum(int(t.get("seconds") or 0) for t in window) // 60
+        failed = sum(t.get("status") not in ("SUCCESS", "STOPPED") for t in window)
+        tasks = sum(bool(t.get("task")) for t in window)
+        rows.append(f"{label}: {len(window)} turns" + (f" ({tasks} tasks)" if tasks else "")
+                    + f" · {tokens // 1000}k tokens · {minutes} min" + (f" · {failed} failed" if failed else ""))
+    since = (today - timedelta(days=29)).isoformat()
+    models = {}
+    for t in turns:
+        if (t.get("at") or "") >= since:
+            model = t.get("model") or "?"
+            models[model] = models.get(model, 0) + int(t.get("tokens") or 0)
+    by_model = " · ".join(f"{m} {n // 1000}k" for m, n in sorted(models.items(), key=lambda kv: -kv[1]))
+    head = f"{engine.MARK} agy usage".strip()
+    return f"{head}\n" + "\n".join(rows) + (f"\n\n30 days by model: {by_model}" if by_model else "")
 
 
 async def _cmd_conv(raw_args: str):

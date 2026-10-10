@@ -14,6 +14,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from .config import cfg
+
 logger = logging.getLogger(__name__)
 
 HOME = Path.home()
@@ -32,14 +34,15 @@ SKILLS_SKIPPED = set()
 WORKSPACE = INBOX = OUTBOX = AGENTS_DIR = AGY_PLUGIN = RULES_FILE = SKILLS_INDEX = MCP_CONFIG = SKILLS_JSON = None
 
 
-def configure(chat_id="", user="", workspace="", machine_notes="", skip_skills=()):
+def configure():
+    """Apply config.cfg (loaded by the plugin's register())."""
     global CHAT_ID, USER, MACHINE_NOTES, SKILLS_SKIPPED, WORKSPACE, INBOX, OUTBOX, AGENTS_DIR, AGY_PLUGIN
     global RULES_FILE, SKILLS_INDEX, MCP_CONFIG, SKILLS_JSON
-    CHAT_ID = str(chat_id or "").strip()
-    USER = str(user or "").strip() or "the user"
-    MACHINE_NOTES = str(machine_notes or "").strip()
-    SKILLS_SKIPPED = set(skip_skills or ())
-    WORKSPACE = Path(os.path.expanduser(workspace or "~/agy-chat"))
+    CHAT_ID = cfg["chat_id"]
+    USER = str(cfg["user_name"] or "").strip() or "the user"
+    MACHINE_NOTES = str(cfg["machine_notes"] or "").strip()
+    SKILLS_SKIPPED = set(cfg["skip_skills"] or ())
+    WORKSPACE = Path(os.path.expanduser(cfg["workspace"] or "~/agy-chat"))
     INBOX = WORKSPACE / "inbox"
     OUTBOX = WORKSPACE / "out"
     AGENTS_DIR = WORKSPACE / ".agents"
@@ -79,22 +82,35 @@ Antigravity subscription: same machine, same user account, same memory, same ski
 - Files {user} attaches land in {inbox}/; their path is in the message.
 - A message starting with "[Replying to …" quotes the message it answers.
 
-## Tools on top of yours (MCP server "hermes")
-- `memory`: durable memory shared with Hermes (MEMORY.md, USER.md below). Write what must outlive
-  the conversation (preference, stable fact), not a report.
-- `session_search`, `hermes_thread`: past conversations with Hermes / their recent Telegram thread.
-- `skill_manage`: create or fix a Hermes skill (a procedure worth reusing).
-- `cronjob_manage`: schedule (reminder = `no_agent: true` + script, free; a job with a prompt runs
-  Hermes' paid LLM: suggest it first). `deliver: telegram:{chat_id}`.
-- `text_to_speech`: voice note (edge, free), then `MEDIA:<path>` in your answer.
-- `telegram_send`: progress update during long work (your final answer is sent anyway).
-- The MCP servers configured in Hermes: same access as Hermes.
+"""
 
+TOOL_NOTES = {
+    "memory": "`memory`: durable memory shared with Hermes. Write what must outlive the conversation "
+              "(preference, stable fact), not a report.",
+    "session_search": "`session_search`: past conversations with Hermes.",
+    "hermes_thread": "`hermes_thread`: their recent Telegram thread with Hermes.",
+    "skill_manage": "`skill_manage`: create or fix a Hermes skill (a procedure worth reusing).",
+    "agy_task": "`agy_task`: schedule a prompt that you (agy) will run unattended, free, its answer sent to "
+                "them on Telegram. Use it for any recurring or later work.",
+    "cronjob_manage": "`cronjob_manage`: Hermes' scheduler (reminder = `no_agent: true` + script, free; a job "
+                      "with a prompt runs Hermes' paid LLM: suggest it first). `deliver: telegram:{chat_id}`.",
+    "text_to_speech": "`text_to_speech`: voice note, then `MEDIA:<path>` in your answer.",
+    "telegram_send": "`telegram_send`: progress update during long work (your final answer is sent anyway).",
+}
+
+SKILLS_SECTION = """\
 ## Hermes' skills
 Hermes' skills ({hermes_home}/skills) are yours too: when a topic matches, read the SKILL.md before
 acting. They sometimes mention Hermes' tools (`terminal`, `read_file`, `browser_*`…): use your
-equivalents. Full index: {skills_index}
-"""
+equivalents. Full index: {skills_index}"""
+
+
+def _tools_section():
+    notes = [f"- {TOOL_NOTES[t].format(chat_id=CHAT_ID)}" for t in TOOL_NOTES if t in cfg["bridge_tools"]]
+    if cfg["share_mcp_servers"]:
+        notes.append("- The MCP servers configured in Hermes: same access as Hermes.")
+    return ("## Tools on top of yours (MCP server \"hermes\")\n" + "\n".join(notes)) if notes else ""
+
 
 
 def prepare(now=None):
@@ -122,27 +138,31 @@ def _write_plugin_shell(summary, now):
 
 
 def _write_rules(summary, now):
-    parts = [RULES_HEAD.format(user=USER, chat_id=CHAT_ID, inbox=_home(INBOX), outbox=_home(OUTBOX),
-                               hermes_home=_home(HERMES_HOME), skills_index=SKILLS_INDEX)]
+    parts = [RULES_HEAD.format(user=USER, inbox=_home(INBOX), outbox=_home(OUTBOX)).rstrip(), _tools_section()]
+    if cfg["share_skills"]:
+        parts.append(SKILLS_SECTION.format(hermes_home=_home(HERMES_HOME), skills_index=SKILLS_INDEX))
     parts.append(f"## Now\n{now:%A %d %B %Y, %H:%M} (machine time, {now.tzname()}).")
     if MACHINE_NOTES:
         parts.append(f"## Machine\n{MACHINE_NOTES}")
-    for title, rel in (("Hermes' personality (SOUL.md) — adopt this tone", "SOUL.md"),
-                       (f"What Hermes knows about {USER} (USER.md, entries separated by §)", "memories/USER.md"),
-                       ("Hermes' memory (MEMORY.md, entries separated by §)", "memories/MEMORY.md")):
-        body = _read(HERMES_HOME / rel)
+    for title, rel, shared in (
+            ("Hermes' personality (SOUL.md) — adopt this tone", "SOUL.md", cfg["share_soul"]),
+            (f"What Hermes knows about {USER} (USER.md, entries separated by §)", "memories/USER.md",
+             cfg["share_memory"]),
+            ("Hermes' memory (MEMORY.md, entries separated by §)", "memories/MEMORY.md", cfg["share_memory"])):
+        body = _read(HERMES_HOME / rel) if shared else ""
         if body:
             parts.append(f"## {title}\n{body}")
-    thread = _hermes_thread()
+    thread = hermes_thread(THREAD_MESSAGES) if cfg["share_thread"] else ""
     if thread:
         parts.append(f"## Recent Telegram thread between {USER} and Hermes (for context, don't answer it)\n"
                      + thread)
-    text = "\n\n".join(parts) + "\n"
+    text = "\n\n".join(p for p in parts if p) + "\n"
     _write_if_changed(RULES_FILE, text)
     summary["rules_bytes"] = len(text.encode())
 
 
-def _hermes_thread():
+def hermes_thread(limit):
+    """The user's recent Telegram messages with Hermes, one line each, oldest first."""
     try:
         from hermes_state_registry import acquire, release_or_close
     except ImportError:
@@ -159,13 +179,13 @@ def _hermes_thread():
             if msg.get("role") not in ("user", "assistant") or not isinstance(content, str):
                 continue
             text = " ".join(content.split())
-            if not text or text.startswith("🔧 agy travaille"):  # progress pings mirrored by agy-chat ≤ 0.4
+            if not text:
                 continue
             if len(text) > THREAD_MSG_CHARS:
                 text = text[:THREAD_MSG_CHARS - 1] + "…"
             who = USER if msg["role"] == "user" else "Hermes"
             lines.append(f"- {_hhmm(msg.get('timestamp'))} {who}: {text}")
-        return "\n".join(lines[-THREAD_MESSAGES:])
+        return "\n".join(lines[-limit:])
     except Exception:
         logger.warning("agy-chat: cannot read the Hermes thread", exc_info=True)
         return ""
@@ -185,7 +205,7 @@ def _write_skills(summary, now):
     root = HERMES_HOME / "skills"
     disabled = _disabled_skills()
     by_parent, index = {}, []
-    for skill_md in sorted(root.glob("**/SKILL.md")):
+    for skill_md in (sorted(root.glob("**/SKILL.md")) if cfg["share_skills"] else ()):
         rel = skill_md.parent.relative_to(root)
         name = skill_md.parent.name
         if any(p.startswith(".") for p in rel.parts) or name in SKILLS_SKIPPED or name in disabled:
@@ -215,12 +235,17 @@ def _disabled_skills():
 
 
 def _write_mcp(summary, now):
-    servers = {"hermes": {"command": str(HERMES_PYTHON), "args": [str(BRIDGE)],
-                          "env": {"HERMES_HOME": str(HERMES_HOME), "AGY_CHAT_CHAT_ID": CHAT_ID,
-                                  "AGY_CHAT_USER": USER}}}
-    for name, spec in _hermes_mcp_servers().items():
-        if name not in servers:
-            servers[name] = spec
+    from . import task_settings
+    servers = {}
+    if cfg["bridge_tools"]:
+        servers["hermes"] = {"command": str(HERMES_PYTHON), "args": [str(BRIDGE)],
+                             "env": {"HERMES_HOME": str(HERMES_HOME), "AGY_CHAT_CHAT_ID": CHAT_ID,
+                                     "AGY_CHAT_USER": USER, "AGY_CHAT_TOOLS": ",".join(cfg["bridge_tools"]),
+                                     "AGY_CHAT_TASK": json.dumps(task_settings(), ensure_ascii=False)}}
+    if cfg["share_mcp_servers"]:
+        for name, spec in _hermes_mcp_servers().items():
+            if name not in servers:
+                servers[name] = spec
     text = json.dumps({"mcpServers": servers}, indent=2) + "\n"
     _write_if_changed(MCP_CONFIG, text, mode=0o600)  # carries the MCP servers' bearer tokens
     summary["mcp_servers"] = sorted(servers)
@@ -275,6 +300,3 @@ def _write_if_changed(path, text, mode=None):
         os.chmod(tmp, mode)
     tmp.replace(path)
 
-
-if __name__ == "__main__":
-    print(json.dumps(prepare(), indent=2, ensure_ascii=False), file=sys.stderr)

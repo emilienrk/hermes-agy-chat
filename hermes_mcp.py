@@ -32,6 +32,9 @@ TARGET_CHAT = os.environ.get("AGY_CHAT_CHAT_ID", "")
 USER = os.environ.get("AGY_CHAT_USER") or "the user"
 TARGET = f"telegram:{TARGET_CHAT}"
 SESSION_KEY = f"agent:main:telegram:dm:{TARGET_CHAT}"
+ENABLED = set(filter(None, os.environ.get("AGY_CHAT_TOOLS", "").split(","))) or None  # None: all
+TASK_SETTINGS = json.loads(os.environ.get("AGY_CHAT_TASK") or "{}")
+
 
 # tool -> (module registering it, note appended to Hermes' description for agy)
 REGISTRY_TOOLS = {
@@ -48,8 +51,8 @@ REGISTRY_TOOLS = {
         "output is sent as is). A job with a prompt runs Hermes' LLM, which is paid: suggest it to "
         f"{USER} before creating it.")),
     "text_to_speech": ("tools.tts_tool", (
-        "Here the default provider is 'edge' (free). The result holds a path: put MEDIA:<path> on a "
-        "line of its own in your answer to send it as a voice note.")),
+        "The result holds a path: put MEDIA:<path> on a line of its own in your answer to send it as a "
+        "voice note.")),
 }
 
 CUSTOM_TOOLS = {
@@ -62,6 +65,26 @@ CUSTOM_TOOLS = {
             "type": "object",
             "properties": {"message": {"type": "string", "description": "Text (simple Markdown)."}},
             "required": ["message"],
+        },
+    },
+    "agy_task": {
+        "description": (
+            f"Schedules a prompt that YOU (agy) will run unattended, free (no Hermes LLM): your answer is "
+            f"sent to {USER} on Telegram. For recurring or later work: daily digest, weekly check, \"in 2h, "
+            "remind me…\". The prompt must be self-contained (no access to this conversation). Actions: "
+            "list, create (schedule + prompt [+ name]), remove (job_id), run (job_id, now)."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "create", "remove", "run"]},
+                "schedule": {"type": "string", "description": (
+                    "create: 'every day at 8am', 'every monday 9am', 'weekdays at 7am', '0 7 * * 1-5', "
+                    "'in 2h' (once), 'every 6h', or an ISO timestamp (once).")},
+                "prompt": {"type": "string", "description": "create: what to do, self-contained."},
+                "name": {"type": "string", "description": "create: short name (optional)."},
+                "job_id": {"type": "string", "description": "remove/run: from list."},
+            },
+            "required": ["action"],
         },
     },
     "hermes_thread": {
@@ -91,9 +114,15 @@ def _registry_entry(name):
     return registry.get_entry(name)
 
 
+def _enabled(name):
+    return ENABLED is None or name in ENABLED
+
+
 def list_tools():
     tools = []
     for name, (_module, note) in REGISTRY_TOOLS.items():
+        if not _enabled(name):
+            continue
         try:
             entry = _registry_entry(name)
         except Exception as e:  # one broken Hermes module must not hide the other tools
@@ -104,12 +133,16 @@ def list_tools():
         schema = entry.schema
         tools.append({"name": name, "description": f"{schema.get('description', '')}\n\n{note}".strip(),
                       "inputSchema": schema.get("parameters") or {"type": "object", "properties": {}}})
-    tools += [{"name": name, **spec} for name, spec in CUSTOM_TOOLS.items()]
+    tools += [{"name": name, **spec} for name, spec in CUSTOM_TOOLS.items() if _enabled(name)]
     return tools
 
 
 def call_tool(name, args):
     args = dict(args or {})
+    if not _enabled(name):
+        return json.dumps({"error": f"Tool disabled: {name}"})
+    if name == "agy_task":
+        return json.dumps(agy_task(args), ensure_ascii=False)
     if name == "telegram_send":
         from tools.send_message_tool import send_message_tool
         return send_message_tool({"action": "send", "target": TARGET, "message": str(args.get("message") or "")})
@@ -117,12 +150,36 @@ def call_tool(name, args):
         return json.dumps(hermes_thread(args.get("limit") or 20), ensure_ascii=False)
     if name not in REGISTRY_TOOLS:
         return json.dumps({"error": f"Unknown tool: {name}"})
-    if name == "text_to_speech":
-        args.setdefault("provider", "edge")
     from tools.registry import registry
     _registry_entry(name)
     result = registry.dispatch(name, args)
     return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+
+
+def _load_by_path(module_name, filename):
+    """A plugin module, by path: this runs outside the package (and must not shadow Hermes' modules)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(module_name, Path(__file__).resolve().with_name(filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def agy_task(args):
+    tasks = _load_by_path("agy_chat_tasks", "tasks.py")
+    action = args.get("action")
+    if action == "list":
+        return {"success": True, "tasks": tasks.list_tasks()}
+    if action == "create":
+        return {"success": True, "task": tasks.create(str(args.get("schedule") or ""), str(args.get("prompt") or ""),
+                                                      TASK_SETTINGS, str(args.get("name") or ""))}
+    if action == "remove":
+        tasks.remove(str(args.get("job_id")))
+        return {"success": True}
+    if action == "run":
+        tasks.run_now(str(args.get("job_id")))
+        return {"success": True, "note": "started; its answer will be sent on Telegram"}
+    return {"success": False, "error": f"unknown action: {action}"}
 
 
 def hermes_thread(limit, max_chars=1500):

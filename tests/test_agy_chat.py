@@ -34,6 +34,7 @@ plugin = _load_plugin()
 engine = sys.modules["agy_chat_under_test.engine"]
 store = sys.modules["agy_chat_under_test.state"]
 workspace = sys.modules["agy_chat_under_test.workspace"]
+config = sys.modules["agy_chat_under_test.config"]
 CHAT = "424242"
 SETTINGS = {"chat_id": CHAT, "user_name": "Alex"}
 plugin.configure(lambda key, default=None: SETTINGS.get(key, default))
@@ -480,6 +481,192 @@ class CommandTests(Base):
         self.assertEqual([c["value"] for c in choices], ["c2", "c1"])
         self.assertIn("premier sujet", await plugin._cmd_conv("2"))
         self.assertEqual(store.load()["conversation_id"], "c1")
+
+
+class SettingsTests(Base):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.cfg_saved = dict(config.cfg)
+
+    async def asyncTearDown(self):
+        config.cfg.clear()
+        config.cfg.update(self.cfg_saved)
+        engine.configure()
+        engine.AGY_BIN = self.saved[(engine, "AGY_BIN")]
+        await super().asyncTearDown()
+
+    def set(self, **values):
+        config.cfg.update(values)
+        engine.configure()
+        engine.AGY_BIN = str(TESTS_DIR / "fake_agy.py")
+
+    async def test_no_reactions_no_footer(self):
+        self.set(react_working="", footer=False, mark="")
+        await self.dispatch(event("/agy salut", msg_id="7"))
+        await self.finish()
+        self.assertNotIn(("react", "7", "👀"), self.adapter.calls)
+        self.assertNotIn("— ", self.adapter.sent()[-1][1])
+
+    async def test_custom_mark_and_reaction(self):
+        self.set(react_working="🔥", mark="🤖")
+        await self.dispatch(event("/agy salut", msg_id="7"))
+        await self.finish()
+        self.assertIn(("react", "7", "🔥"), self.adapter.calls)
+        self.assertIn("— 🤖 agy", self.adapter.sent()[-1][1])
+
+    async def test_verbose_default_from_settings(self):
+        store.DEFAULT_VERBOSE = True
+        try:
+            self.assertTrue(store.verbose(store.load()))
+            self.assertIn("Discreet", await plugin._cmd_verbose(""))
+            self.assertFalse(store.verbose(store.load()))
+        finally:
+            store.DEFAULT_VERBOSE = False
+
+    async def test_voice_reply_mirror(self):
+        spoken = []
+
+        async def speak(text, reply_to=None):
+            spoken.append(text)
+        saved, engine._speak = engine._speak, speak
+        try:
+            self.assertIn("voice note too", await plugin._cmd_voice("reply mirror"))
+            store.update(sticky=True)
+            await self.dispatch(event("écris", msg_id="1"))
+            await self.finish()
+            self.assertEqual(spoken, [])
+            voice = self.tmp / "v.ogg"
+            voice.write_bytes(b"ogg")
+            await self.dispatch(event("", media=[voice], types=["audio/ogg"], mtype="voice", msg_id="2"))
+            await self.finish()
+            self.assertEqual(len(spoken), 1)
+            self.assertIn("ECHO:", spoken[0])
+            self.assertNotIn("file://", spoken[0])
+            self.assertIn("Invalid", await plugin._cmd_voice("reply loud"))
+        finally:
+            engine._speak = saved
+
+    async def test_spoken_text(self):
+        self.assertEqual(engine._spoken_text("Voir [doc](https://x.y)\nMEDIA:/tmp/a.png\nfin"), "Voir doc\nfin")
+
+
+class AgentTests(Base):
+    async def test_handoff_seeds_a_new_conversation(self):
+        store.update(conversation_id="old")
+        saved, workspace.hermes_thread = workspace.hermes_thread, lambda limit: "- Alex: plan the trip"
+        try:
+            result = await self.dispatch(event("/agy_handoff continue", msg_id="5"))
+            await self.finish()
+        finally:
+            workspace.hermes_thread = saved
+        self.assertEqual(result["action"], "skip")
+        call = self.calls()[0]
+        self.assertIsNone(call["conversation"])
+        self.assertIn("plan the trip", call["prompt"])
+        self.assertTrue(call["prompt"].rstrip().endswith("continue"))
+        self.assertTrue(store.load()["sticky"])
+
+    async def test_back_rewrites_for_hermes(self):
+        store.update(conversation_id="c1", sticky=True)
+        store.log_turn({"conversation_id": "c1", "message": "fix the build", "response": "build fixed"})
+        result = await self.dispatch(event("/agy_back and now?", msg_id="6"))
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn("build fixed", result["text"])
+        self.assertTrue(result["text"].endswith("and now?"))
+        self.assertNotIn("sticky", store.load())
+        self.assertIsNone(engine._worker)
+
+    async def test_usage(self):
+        self.assertEqual(await plugin._cmd_usage(""), "No agy turn recorded.")
+        store.log_turn({"model": "m1", "status": "SUCCESS", "tokens": 3000, "seconds": 90})
+        store.log_turn({"model": "m1", "status": "ERROR", "tokens": 1000, "seconds": 30, "task": "digest"})
+        usage = await plugin._cmd_usage("")
+        self.assertIn("Today: 2 turns (1 tasks) · 4k tokens · 2 min · 1 failed", usage)
+        self.assertIn("m1 4k", usage)
+
+    async def test_tasks(self):
+        import importlib
+        tasks = importlib.import_module("agy_chat_under_test.tasks")
+        jobs, calls = {}, []
+
+        def cron(args):
+            calls.append(args)
+            if args["action"] == "create":
+                jobs["j1"] = {"job_id": "j1", "schedule": args["schedule"], "next_run_at": "2026-10-11T08:00:00"}
+                return {"success": True, "job": jobs["j1"]}
+            if args["action"] == "list":
+                return {"success": True, "jobs": list(jobs.values())}
+            if args["action"] == "remove":
+                jobs.pop(args["job_id"])
+            return {"success": True}
+        saved = (tasks._cron, tasks.HERMES_HOME, tasks._registry_path)
+        tasks._cron, tasks.HERMES_HOME = cron, self.tmp
+        tasks._registry_path = lambda: self.tmp / "tasks.json"
+        try:
+            self.assertIn("Usage", await plugin._cmd_task("add every day"))
+            added = await plugin._cmd_task("add every day at 8am | résume mes mails")
+            self.assertIn("scheduled", added)
+            create = calls[0]
+            self.assertTrue(create["no_agent"])
+            self.assertEqual(create["deliver"], f"telegram:{CHAT}")
+            script = self.tmp / "scripts" / create["script"]
+            self.assertIn("agy_run.py", script.read_text())
+            self.assertIn("1. résume mes mails · every day at 8am", await plugin._cmd_task(""))
+            self.assertIn("removed", await plugin._cmd_task("rm 1"))
+            self.assertFalse(script.exists())
+            self.assertIn("No agy task", await plugin._cmd_task(""))
+        finally:
+            tasks._cron, tasks.HERMES_HOME, tasks._registry_path = saved
+
+    async def test_agy_run(self):
+        import subprocess
+        task = {"name": "digest", "prompt": "résume", "agy_bin": str(TESTS_DIR / "fake_agy.py"),
+                "workspace": str(self.tmp), "model": "m1", "timeout_minutes": 1, "user": "Alex", "mark": "🛸"}
+        env = {**os.environ, "HERMES_HOME": str(self.tmp)}
+        out = subprocess.run([sys.executable, str(PLUGIN_DIR / "agy_run.py"), json.dumps(task)],
+                             capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue(out.stdout.startswith("🛸 agy · digest\n\n"))
+        self.assertIn("ECHO:", out.stdout)
+        self.assertIn("Voir main.py.", out.stdout)
+        self.assertIn("unattended", self.calls()[0]["prompt"])
+        self.mode("crash")
+        out = subprocess.run([sys.executable, str(PLUGIN_DIR / "agy_run.py"), json.dumps(task)],
+                             capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("❌", out.stdout)
+
+
+class WorkspaceTests(Base):
+    async def test_share_toggles(self):
+        home = self.tmp / "hermes"
+        (home / "memories").mkdir(parents=True)
+        (home / "SOUL.md").write_text("be kind")
+        (home / "memories" / "MEMORY.md").write_text("likes tea")
+        saved = (workspace.HERMES_HOME, workspace.RULES_FILE, workspace.hermes_thread, dict(config.cfg))
+        workspace.HERMES_HOME, workspace.RULES_FILE = home, self.tmp / "AGENTS.md"
+        workspace.hermes_thread = lambda limit: "- Alex: hi"
+        try:
+            workspace._write_rules({}, datetime_now())
+            rules = workspace.RULES_FILE.read_text()
+            for text in ("be kind", "likes tea", "Alex: hi", "`memory`", "`agy_task`", "Hermes' skills"):
+                self.assertIn(text, rules)
+            config.cfg.update(share_soul=False, share_memory=False, share_thread=False, share_skills=False,
+                              share_mcp_servers=False, bridge_tools=["telegram_send"])
+            workspace._write_rules({}, datetime_now())
+            rules = workspace.RULES_FILE.read_text()
+            for text in ("be kind", "likes tea", "Alex: hi", "`memory`", "`agy_task`", "Hermes' skills"):
+                self.assertNotIn(text, rules)
+            self.assertIn("`telegram_send`", rules)
+        finally:
+            workspace.HERMES_HOME, workspace.RULES_FILE, workspace.hermes_thread = saved[:3]
+            config.cfg.clear()
+            config.cfg.update(saved[3])
+
+
+def datetime_now():
+    from datetime import datetime
+    return datetime.now().astimezone()
 
 
 if __name__ == "__main__":

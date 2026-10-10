@@ -1,7 +1,7 @@
 name: agy-chat
 label: agy chat
 kind: standalone
-version: 1.2.0
+version: 1.3.0
 manifest_version: 2
 author: Emilien Roukine
 license: MIT
@@ -10,9 +10,10 @@ tags: [telegram, gateway, antigravity, agy]
 description: >
   Talk to Antigravity (agy) from Telegram as an alternative to Hermes' LLM: the
   agy mode (/agy_on), /agy <message> or a reply to agy routes your messages to
-  the agy CLI instead of Hermes. Voice notes and files ride along, and agy gets
-  Hermes' memory, skills, MCP servers and a few Hermes tools through a bundled
-  MCP bridge. No Hermes LLM tokens are spent on routed messages.
+  the agy CLI instead of Hermes. Voice notes and files ride along (voice replies
+  too), agy gets Hermes' memory, skills, MCP servers and a few Hermes tools
+  through a bundled MCP bridge, runs scheduled tasks free of Hermes' LLM, and
+  conversations can be handed over between Hermes and agy.
 requires_hermes: ">=0.21.6"
 provides_tools: []
 provides_hooks:
@@ -51,3 +52,71 @@ config_schema:
     type: list
     default: []
     description: Hermes skill names hidden from agy.
+  timeout_minutes:
+    type: int
+    default: 30
+    description: Longest agy turn before it is stopped.
+  mark:
+    type: str
+    default: "🛸"
+    label: Mark emoji
+    description: Emoji in the footer, status and banner ("" for none).
+  react_working:
+    type: str
+    default: "👀"
+    description: Reaction on your message while agy works ("" for none).
+  react_queued:
+    type: str
+    default: "✍"
+    description: Reaction on a message waiting behind a turn ("" for none).
+  footer:
+    type: bool
+    default: true
+    description: "Footer under agy's answers (— 🛸 agy · 2 min)."
+  verbose:
+    type: bool
+    default: false
+    description: Live status of agy's actions by default (/agy_verbose toggles it).
+  voice_input:
+    type: str
+    choices: [direct, local]
+    default: direct
+    description: "Voice notes: direct (audio to agy, Google) or local (Hermes' Whisper first)."
+  voice_reply:
+    type: str
+    choices: ["off", mirror, always]
+    default: "off"
+    description: "agy's answer as a voice note too: off, mirror (when you sent one), always."
+  tts_provider:
+    type: str
+    choices: ["", edge]
+    default: ""
+    description: "Voice replies: \"\" uses Hermes' TTS settings; edge calls Edge TTS directly (free, no key)."
+  tts_voice:
+    type: str
+    default: ""
+    description: "Edge voice (e.g. fr-FR-DeniseNeural); default: Hermes' tts.edge.voice."
+  share_soul:
+    type: bool
+    default: true
+    description: Give agy Hermes' personality (SOUL.md).
+  share_memory:
+    type: bool
+    default: true
+    description: Give agy Hermes' memory (MEMORY.md, USER.md).
+  share_thread:
+    type: bool
+    default: true
+    description: Give agy your recent Telegram thread with Hermes.
+  share_skills:
+    type: bool
+    default: true
+    description: Give agy Hermes' skills.
+  share_mcp_servers:
+    type: bool
+    default: true
+    description: Give agy the MCP servers configured in Hermes.
+  bridge_tools:
+    type: list
+    default: [memory, session_search, skill_manage, cronjob_manage, text_to_speech, telegram_send, hermes_thread, agy_task]
+    description: Hermes tools agy gets through the bundled MCP bridge ([] turns the bridge off).

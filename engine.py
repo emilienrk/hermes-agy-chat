@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import state as store
 from . import workspace
+from .config import cfg
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 AGY_BIN = "agy"
 TARGET_CHAT = ""
 TARGET = ""
-PRINT_TIMEOUT = "30m"
+PRINT_TIMEOUT = "30m"  # PRINT_TIMEOUT, HARD_TIMEOUT_S, MARK, REACT_*: set by configure()
 HARD_TIMEOUT_S = 35 * 60
 TYPING_EVERY_S = 4.5
 STATUS_EVERY_S = 4.0
@@ -40,9 +41,13 @@ RECAP_TURNS = 6
 REACT_WORKING = "👀"
 REACT_QUEUED = "✍"
 MARK = "🛸"
-MODE_BANNER = (f"{MARK} agy mode on · /agy_off to go back to Hermes\n"
-               "Your messages, photos and voice notes go to agy. For Hermes: \"Hermes …\" or a / command. "
-               "Here /stop and /new act on agy.")
+MAX_SPOKEN_CHARS = 4000
+
+
+def mode_banner():
+    return (f"{MARK} agy mode on · /agy_off to go back to Hermes\n"
+            "Your messages, photos and voice notes go to agy. For Hermes: \"Hermes …\" or a / command. "
+            "Here /stop and /new act on agy.")
 
 _PARAM_KEYS = ("CommandLine", "AbsolutePath", "TargetFile", "Url", "Query", "SearchPath",
                "DirectoryPath", "Pattern", "Path")
@@ -107,12 +112,17 @@ _worker = None
 _run = None
 
 
-def configure(chat_id, agy_bin=""):
-    global AGY_BIN, TARGET_CHAT, TARGET
-    TARGET_CHAT = str(chat_id or "").strip()
+def configure():
+    """Apply config.cfg (loaded by the plugin's register())."""
+    global AGY_BIN, TARGET_CHAT, TARGET, PRINT_TIMEOUT, HARD_TIMEOUT_S, MARK, REACT_WORKING, REACT_QUEUED
+    TARGET_CHAT = cfg["chat_id"]
     TARGET = f"telegram:{TARGET_CHAT}"
-    AGY_BIN = os.path.expanduser(agy_bin) if agy_bin else (
+    AGY_BIN = os.path.expanduser(cfg["agy_path"]) if cfg["agy_path"] else (
         shutil.which("agy") or str(Path.home() / ".local/bin/agy"))
+    PRINT_TIMEOUT = f"{cfg['timeout_minutes']}m"
+    HARD_TIMEOUT_S = (cfg["timeout_minutes"] + 5) * 60
+    MARK = str(cfg["mark"] or "")
+    REACT_WORKING, REACT_QUEUED = str(cfg["react_working"] or ""), str(cfg["react_queued"] or "")
 
 
 # ── binding to the gateway ──
@@ -187,7 +197,7 @@ async def submit(job):
     if _worker is None or _worker.done():
         _worker = asyncio.get_running_loop().create_task(_drain(), name="agy-chat")
         return False
-    if job.message_id:
+    if job.message_id and REACT_QUEUED:
         await react(job.message_id, REACT_QUEUED)
     return True
 
@@ -233,11 +243,11 @@ async def _turn(jobs):
         store.update(conversation_id=None)
     state = store.load()
     conv = state.get("conversation_id")
-    verbose = bool(state.get("verbose"))
+    verbose = store.verbose(state)
     anchor = next((job.message_id for job in reversed(jobs) if job.message_id), None)
     run = _run = Run(jobs, store.model(state))
     for job in jobs:
-        if job.message_id:
+        if job.message_id and REACT_WORKING:
             await react(job.message_id, REACT_WORKING)
 
     message, files = await _compose(jobs, verbose)
@@ -274,6 +284,8 @@ async def _turn(jobs):
     if verbose and run.status_msg:
         await _edit(run.status_msg, _summary(run))
     await deliver(body, attachments, anchor)
+    if _speaks(state, jobs) and not run.failed() and run.result:
+        await _speak(_spoken_text(run.result.get("response") or ""), anchor)
     await asyncio.to_thread(store.log_turn, {
         "model": run.model, "conversation_id": store.load().get("conversation_id"),
         "message": message[:500], "response": ((run.result or {}).get("response") or "")[:2000],
@@ -465,7 +477,7 @@ async def _status_loop(run, anchor):
 
 
 def _status_text(run):
-    lines = [f"{MARK} agy working · {_elapsed(run.started)} · {len(run.actions)} actions"]
+    lines = [f"{MARK} agy working · {_elapsed(run.started)} · {len(run.actions)} actions".strip()]
     if run.current:
         lines.append(f"▶ {run.current}")
     lines += run.actions[-STATUS_ACTIONS:][::-1]
@@ -509,11 +521,12 @@ def _reply(run, verbose, notice=""):
             attachments.append(str(full))
     if not verbose and run.actions and not run.stopped and (run.result or {}).get("status") != "SUCCESS":
         text += "\n\nLast actions:\n" + "\n".join(run.actions[-5:])
-    footer = f"— {MARK} agy · {_elapsed(run.started)}"
-    if verbose:
-        footer = f"— {MARK} agy · {run.model} · {_elapsed(run.started)}"
-        if not run.status_msg and run.actions:  # turn too short for the live status message
-            text += "\n\n" + _summary(run)
+    footer = ""
+    if cfg["footer"]:
+        parts = [f"{MARK} agy".strip(), *([run.model] if verbose else []), _elapsed(run.started)]
+        footer = "— " + " · ".join(parts)
+    if verbose and not run.status_msg and run.actions:  # turn too short for the live status message
+        text += "\n\n" + _summary(run)
     if notice:
         text = f"{notice}\n\n{text}"
     return f"{text}\n\n{footer}".strip(), attachments
@@ -618,7 +631,7 @@ async def set_mode_banner(sticky):
         if sticky and not pinned:
             from telegram import ReplyKeyboardRemove
             # ReplyKeyboardRemove clears the input keyboard an earlier version used as the indicator.
-            msg = await bot.send_message(chat_id=chat, text=MODE_BANNER, reply_markup=ReplyKeyboardRemove())
+            msg = await bot.send_message(chat_id=chat, text=mode_banner(), reply_markup=ReplyKeyboardRemove())
             await bot.pin_chat_message(chat_id=chat, message_id=msg.message_id, disable_notification=True)
             store.update(mode_pin=msg.message_id)
         elif not sticky and pinned:
@@ -656,6 +669,84 @@ async def react(message_id, emoji):
         await setter(TARGET_CHAT, message_id, emoji)
     except Exception:
         logger.debug("agy-chat: reaction failed", exc_info=True)
+
+
+# ── voice replies ──
+
+def _speaks(state, jobs):
+    mode = store.voice_reply(state)
+    return mode == "always" or (mode == "mirror" and any(job.voice for job in jobs))
+
+
+def _spoken_text(response):
+    """What is worth reading aloud: no MEDIA lines, links reduced to their label."""
+    lines = [line for line in response.splitlines() if not line.lstrip().startswith("MEDIA:")]
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", "\n".join(lines)).strip()
+    return text[:MAX_SPOKEN_CHARS]
+
+
+async def _speak(text, reply_to=None):
+    """Read agy's answer aloud and send it as a voice note."""
+    if not text:
+        return
+    try:
+        path = await (_edge_voice(text) if cfg["tts_provider"] == "edge" else asyncio.to_thread(_hermes_voice, text))
+    except Exception:
+        logger.exception("agy-chat: TTS failed")
+        return
+    ad = adapter()
+    if not path or ad is None:
+        return
+    try:
+        res = await ad.send_voice(TARGET_CHAT, path, reply_to=reply_to)
+    except Exception:
+        logger.exception("agy-chat: cannot send the voice reply")
+        return
+    if res is not None and res.success:
+        store.remember_agy_messages([res.message_id])
+
+
+def _hermes_voice(text):
+    """Hermes' TTS, with its configured provider (it ignores per-call provider overrides)."""
+    from tools.tts_tool import text_to_speech_tool
+    out = json.loads(text_to_speech_tool(text=text))
+    if not out.get("success"):
+        logger.warning("agy-chat: Hermes TTS failed: %s", str(out.get("error") or out)[:300])
+    return out.get("file_path") if out.get("success") else None
+
+
+async def _edge_voice(text):
+    """Edge TTS (free) straight from the edge_tts package Hermes ships, as an OGG/Opus voice note."""
+    import edge_tts
+    try:
+        from tools.tts_text_normalize import prepare_spoken_text
+        text = prepare_spoken_text(text, max_chars=None)
+    except Exception:
+        pass
+    workspace.OUTBOX.mkdir(parents=True, exist_ok=True)
+    base = workspace.OUTBOX / f"voice-{datetime.now():%Y%m%d-%H%M%S}"
+    mp3, ogg = base.with_suffix(".mp3"), base.with_suffix(".ogg")
+    await edge_tts.Communicate(text, _edge_voice_name()).save(str(mp3))
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-loglevel", "error", "-i", str(mp3), "-c:a", "libopus", "-b:a", "32k", str(ogg),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    _out, err = await proc.communicate()
+    if proc.returncode != 0:  # no ffmpeg/opus: Telegram still plays the MP3, as an audio file
+        logger.warning("agy-chat: ffmpeg failed: %s", err.decode(errors="replace")[:300])
+        return str(mp3)
+    mp3.unlink(missing_ok=True)
+    return str(ogg)
+
+
+def _edge_voice_name():
+    if cfg["tts_voice"]:
+        return cfg["tts_voice"]
+    try:
+        import yaml
+        tts = (yaml.safe_load((workspace.HERMES_HOME / "config.yaml").read_text()) or {}).get("tts") or {}
+        return (tts.get("edge") or {}).get("voice") or "en-US-AriaNeural"
+    except Exception:
+        return "en-US-AriaNeural"
 
 
 # ── helpers ──

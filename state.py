@@ -25,7 +25,9 @@ DATA_DIR = _data_dir()
 STATE_FILE = DATA_DIR / "state.json"
 TURNS_LOG = DATA_DIR / "turns.log"
 DEFAULT_MODEL = "gemini-3.8-flash-high"
-DEFAULT_VOICE = "direct"
+DEFAULT_VOICE = "direct"  # DEFAULT_*: overridden by the plugin settings at register()
+DEFAULT_VOICE_REPLY = "off"
+DEFAULT_VERBOSE = False
 AGY_MSGS_KEEP = 400
 LOG_TAIL_BYTES = 512 * 1024
 
@@ -64,6 +66,15 @@ def model(state):
 
 def voice_mode(state):
     return state.get("voice") or DEFAULT_VOICE
+
+
+def voice_reply(state):
+    return state.get("voice_reply") or DEFAULT_VOICE_REPLY
+
+
+def verbose(state):
+    value = state.get("verbose")
+    return DEFAULT_VERBOSE if value is None else bool(value)
 
 
 def remember_agy_messages(ids):

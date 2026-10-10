@@ -11,7 +11,7 @@ from . import engine, workspace
 TOKEN_FILE = Path.home() / ".gemini/antigravity-cli/antigravity-oauth-token"
 AGY_SETTINGS = Path.home() / ".gemini/antigravity-cli/settings.json"
 COMMANDS = ("agy", "agy_on", "agy_off", "agy_new", "agy_stop", "agy_model", "agy_verbose", "agy_voice",
-            "agy_conv", "agy_retry", "agy_doctor")
+            "agy_conv", "agy_retry", "agy_handoff", "agy_back", "agy_task", "agy_usage", "agy_doctor")
 
 
 async def report():
@@ -68,7 +68,9 @@ async def _bridge():
         from mcp.client.stdio import stdio_client
     except ImportError as e:
         return [f"✗ cannot test the MCP bridge: {e}"]
-    config = json.loads(workspace.MCP_CONFIG.read_text())["mcpServers"]["hermes"]
+    config = json.loads(workspace.MCP_CONFIG.read_text())["mcpServers"].get("hermes")
+    if config is None:
+        return ["✓ hermes MCP bridge: off (bridge_tools is empty)"]
     params = StdioServerParameters(command=config["command"], args=config["args"],
                                    env={"HOME": str(Path.home()), "PATH": "/usr/bin:/bin", **config.get("env", {})})
 
