@@ -168,18 +168,6 @@ class RoutingTests(Base):
     def route(self, ev, **state):
         return plugin.route(ev, state)
 
-    def test_trigger_words(self):
-        job = self.route(event("Jet, relance le serveur"))[1]
-        self.assertEqual(job.text, "relance le serveur")
-        self.assertEqual(self.route(event("AGY: salut"))[1].text, "salut")
-        self.assertEqual(self.route(event("jet"))[1].text, "")
-        for text in ("Jette un œil", "jet-ski demain ?", "Le jet privé", "salut"):
-            self.assertIsNone(self.route(event(text)), text)
-
-    def test_custom_triggers(self):
-        self.assertEqual(self.route(event("Ovni : fais ça"), triggers=["ovni"])[1].text, "fais ça")
-        self.assertIsNone(self.route(event("jet fais ça"), triggers=["ovni"]))
-
     def test_commands(self):
         self.assertEqual(self.route(event("/agy liste les fichiers"))[1].text, "liste les fichiers")
         self.assertEqual(self.route(event("/agy@HermesBot liste"))[1].text, "liste")
@@ -204,13 +192,13 @@ class RoutingTests(Base):
         job = self.route(event("et maintenant ?", reply_to="55", reply_text="réponse d'agy"), **state)[1]
         self.assertEqual((job.text, job.quoted), ("et maintenant ?", ""))
         self.assertIsNone(self.route(event("et maintenant ?", reply_to="56"), **state))
-        quoted = self.route(event("jet fais ça", reply_to="56", reply_text="le plan de Hermes"), **state)[1]
+        quoted = self.route(event("/agy fais ça", reply_to="56", reply_text="le plan de Hermes"), **state)[1]
         self.assertEqual(quoted.quoted, "le plan de Hermes")
 
     def test_media_voice_and_inlined_documents(self):
         doc = self.tmp / "notes.txt"
         doc.write_text("ligne 1\nligne 2")
-        text = f"[Content of notes.txt]:\nligne 1\nligne 2\n\njet résume\n[document 'notes.txt' saved at: {doc}]"
+        text = f"[Content of notes.txt]:\nligne 1\nligne 2\n\n/agy résume\n[document 'notes.txt' saved at: {doc}]"
         job = self.route(event(text, media=[doc], types=["text/plain"], mtype="document"))[1]
         self.assertEqual((job.text, job.files), ("résume", [(str(doc), "text/plain")]))
         voice = self.route(event("", media=["/c/v.ogg"], types=["audio/ogg"], mtype="voice"), sticky=True)[1]
@@ -220,14 +208,14 @@ class RoutingTests(Base):
         self.assertEqual(photo.files, [("/c/p.jpg", "image/jpeg")])
 
     async def test_dispatch_ignores_other_chats(self):
-        self.assertIsNone(await self.dispatch(event("jet salut", chat="42")))
+        self.assertIsNone(await self.dispatch(event("/agy salut", chat="42")))
         self.assertIsNone(engine._worker)
 
     async def test_nothing_routed_without_chat_id(self):
         engine.TARGET_CHAT = ""
         try:
-            self.assertIsNone(await self.dispatch(event("jet salut", chat="")))
-            self.assertIsNone(await self.dispatch(event("jet salut")))
+            self.assertIsNone(await self.dispatch(event("/agy salut", chat="")))
+            self.assertIsNone(await self.dispatch(event("/agy salut")))
         finally:
             engine.TARGET_CHAT = CHAT
         self.assertIsNone(engine._worker)
@@ -235,7 +223,7 @@ class RoutingTests(Base):
 
 class TurnTests(Base):
     async def test_basic_turn(self):
-        result = await self.dispatch(event("jet liste mes projets", msg_id="7"))
+        result = await self.dispatch(event("/agy liste mes projets", msg_id="7"))
         self.assertEqual(result, {"action": "skip", "reason": "agy-chat"})
         await self.finish()
         reply = self.adapter.sent()[-1]
@@ -258,14 +246,14 @@ class TurnTests(Base):
         log = [json.loads(line) for line in store.TURNS_LOG.read_text().splitlines()]
         self.assertEqual((log[-1]["status"], log[-1]["tokens"]), ("SUCCESS", 54321))
 
-        await self.dispatch(event("jet et ensuite ?", msg_id="8"))
+        await self.dispatch(event("/agy et ensuite ?", msg_id="8"))
         await self.finish()
         second = self.calls()[1]
         self.assertEqual(second["conversation"], state["conversation_id"])
         self.assertNotIn("Context:", second["prompt"])
 
     async def test_reply_threading_reaches_agy(self):
-        await self.dispatch(event("jet salut", msg_id="7"))
+        await self.dispatch(event("/agy salut", msg_id="7"))
         await self.finish()
         agy_msg = self.adapter.sent()[-1]
         agy_id = str(self.adapter.next_id)
@@ -277,10 +265,10 @@ class TurnTests(Base):
 
     async def test_queue_merges_messages(self):
         self.mode("verbose")
-        await self.dispatch(event("jet tâche longue", msg_id="1"))
+        await self.dispatch(event("/agy tâche longue", msg_id="1"))
         await asyncio.sleep(0.5)
-        await self.dispatch(event("jet et aussi ça", msg_id="2"))
-        await self.dispatch(event("jet et ça", msg_id="3"))
+        await self.dispatch(event("/agy et aussi ça", msg_id="2"))
+        await self.dispatch(event("/agy et ça", msg_id="3"))
         self.assertIn(("react", "2", "✍"), self.adapter.calls)
         self.mode("ok")
         await self.finish(40)
@@ -293,7 +281,7 @@ class TurnTests(Base):
 
     async def test_stop_kills_the_turn(self):
         self.mode("slow")
-        await self.dispatch(event("jet attends", msg_id="1"))
+        await self.dispatch(event("/agy attends", msg_id="1"))
         await asyncio.sleep(1.5)
         started = time.time()
         self.assertEqual(await plugin._cmd_stop(""), "🛑 Stop requested.")
@@ -314,7 +302,7 @@ class TurnTests(Base):
 
     async def test_launch_failure_cleans_up(self):
         engine.AGY_BIN = str(self.tmp / "missing-agy")
-        await self.dispatch(event("jet salut", msg_id="7"))
+        await self.dispatch(event("/agy salut", msg_id="7"))
         await self.finish()
         self.assertIn("❌ agy-chat", self.adapter.sent()[-1][1])
         self.assertNotIn("inflight", store.load())
@@ -325,7 +313,7 @@ class TurnTests(Base):
         store.update(conversation_id="old-conv")
         store.log_turn({"conversation_id": "old-conv", "message": "avant", "response": "réponse d'avant"})
         self.mode("saturated")
-        await self.dispatch(event("jet continue", msg_id="1"))
+        await self.dispatch(event("/agy continue", msg_id="1"))
         await self.finish()
         calls = self.calls()
         self.assertEqual([c["conversation"] for c in calls], ["old-conv", None])
@@ -337,7 +325,7 @@ class TurnTests(Base):
 
     async def test_crash_reports_error_and_retry_works(self):
         self.mode("crash")
-        await self.dispatch(event("jet plante", msg_id="1"))
+        await self.dispatch(event("/agy plante", msg_id="1"))
         await self.finish()
         reply = self.adapter.sent()[-1][1]
         self.assertIn("❌", reply)
@@ -355,7 +343,7 @@ class TurnTests(Base):
         (TESTS_DIR / "media.txt").write_text(
             f"MEDIA:{image}\nMEDIA:{doc}\nMEDIA:{self.tmp}/absent.png\nMEDIA:{Path.home()}/.hermes/.env")
         self.mode("media")
-        await self.dispatch(event("jet envoie", msg_id="4"))
+        await self.dispatch(event("/agy envoie", msg_id="4"))
         await self.finish()
         self.assertEqual(self.adapter.sent("image"), [("image", str(image), "4")])
         self.assertEqual(self.adapter.sent("document"), [("document", str(doc), "4")])
@@ -369,7 +357,7 @@ class TurnTests(Base):
     async def test_verbose_status_and_summary(self):
         store.update(verbose=True)
         self.mode("verbose")
-        await self.dispatch(event("jet build", msg_id="5"))
+        await self.dispatch(event("/agy build", msg_id="5"))
         await self.finish(30)
         status = self.adapter.sent()[0]
         self.assertTrue(status[1].startswith("🛸 agy working"))
@@ -382,7 +370,7 @@ class TurnTests(Base):
 
     async def test_long_reply_goes_to_file(self):
         self.mode("long")
-        await self.dispatch(event("jet long", msg_id="6"))
+        await self.dispatch(event("/agy long", msg_id="6"))
         await self.finish()
         text = self.adapter.sent()[-1][1]
         self.assertIn("[…continued in the attached file]", text)
@@ -417,7 +405,7 @@ class TurnTests(Base):
     async def test_attachments_are_copied_to_inbox(self):
         photo = self.tmp / "photo.jpg"
         photo.write_bytes(b"jpg")
-        await self.dispatch(event("jet c'est quoi ?", media=[photo], types=["image/jpeg"], mtype="photo"))
+        await self.dispatch(event("/agy c'est quoi ?", media=[photo], types=["image/jpeg"], mtype="photo"))
         await self.finish()
         prompt = self.calls()[0]["prompt"]
         self.assertIn("Files attached by Alex", prompt)
@@ -426,7 +414,7 @@ class TurnTests(Base):
         self.assertIn(str(copied[0]), prompt)
 
     async def test_huge_message_goes_through_a_file(self):
-        await self.dispatch(event("jet " + "a" * 150_000))
+        await self.dispatch(event("/agy " + "a" * 150_000))
         await self.finish()
         prompt = self.calls()[0]["prompt"]
         self.assertIn("too long for the command line", prompt)
@@ -446,7 +434,6 @@ class CommandTests(Base):
     async def test_status_card_and_modes(self):
         card = await plugin._cmd_agy("")
         self.assertIn("Hermes mode", card)
-        self.assertIn("jet", card)
         self.assertIsNone(await plugin._cmd_on(""))
         self.assertTrue(store.load()["sticky"])
         _kind, banner, _markup = self.adapter.sent("bot_send")[-1]
@@ -480,14 +467,9 @@ class CommandTests(Base):
         self.assertEqual(await plugin._cmd_model("1"), "agy model → gemini-3.8-flash-high")
         self.assertIn("Unknown", await plugin._cmd_model("gpt-9"))
 
-    async def test_verbose_and_words(self):
+    async def test_verbose(self):
         self.assertIn("Detailed", await plugin._cmd_verbose(""))
         self.assertIn("Discreet", await plugin._cmd_verbose(""))
-        self.assertIn("ovni, jet", await plugin._cmd_words("Ovni jet"))
-        self.assertEqual(store.triggers(store.load()), ["ovni", "jet"])
-        self.assertIn("Invalid", await plugin._cmd_words("j3t"))
-        await plugin._cmd_words("reset")
-        self.assertEqual(store.triggers(store.load()), ["jet", "agy"])
 
     async def test_conversations(self):
         self.assertEqual(await plugin._cmd_conv(""), "No agy conversation recorded.")

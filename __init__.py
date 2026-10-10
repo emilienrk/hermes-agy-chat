@@ -1,7 +1,6 @@
 """Talk to Antigravity (agy) from Telegram: an alternative to Hermes' paid LLM.
 
 What reaches agy (the configured chat only):
-  "jet …", "agy …"   a message starting with a trigger word (/agy_words changes them)
   a reply            to one of agy's messages
   everything         while the agy mode is on (/agy_on … /agy_off, shown by a pinned banner);
                      slash commands and messages starting with "Hermes" still go to Hermes,
@@ -33,10 +32,8 @@ logger = logging.getLogger(__name__)
 
 MODELS_TTL_S = 3600
 INLINE_DOC_MAX_BYTES = 100 * 1024
-TRIGGER_SUGGESTIONS = ("jet", "ufo", "zap", "neo")
 _SLASH = re.compile(r"^/([A-Za-z0-9_-]+)(?:@\w+)?(?=\s|$)")
 _HERMES_WORD = re.compile(r"^\s*herm[eè]s(?=$|[\s,:;.!?])", re.I)
-_WORD = re.compile(r"^[^\W\d_]{2,12}$")
 
 _models_cache = {"at": 0.0, "models": []}
 
@@ -54,7 +51,6 @@ def register(ctx):
         ("agy-voice", _cmd_voice, "Voice notes: straight to agy or local transcription", "[direct|local]"),
         ("agy-conv", _cmd_conv, "Resume an agy conversation", "[number]"),
         ("agy-retry", _cmd_retry, "Send my last message to agy again", ""),
-        ("agy-words", _cmd_words, "Trigger words for agy", "[words…]"),
         ("agy-doctor", _cmd_doctor, "Check the agy integration", ""),
     ):
         ctx.register_command(name, handler=handler, description=description, args_hint=hint)
@@ -121,23 +117,11 @@ def route(event, state):
         if sticky and name == "new":
             return ("new",)
         return None
-    rest = strip_trigger(caption, store.triggers(state))
-    if rest is not None:
-        return "job", _job(event, rest, media, to_agy)
     if sticky and _HERMES_WORD.match(caption):
         return None
     if to_agy or sticky:
         return "job", _job(event, caption, media, to_agy)
     return None
-
-
-def strip_trigger(text, triggers):
-    """The text after a leading trigger word, or None when it doesn't start with one."""
-    words = "|".join(re.escape(w) for w in triggers if w)
-    if not words:
-        return None
-    match = re.match(rf"\s*(?:{words})(?=$|[\s,:;.!?])[\s,:;.!?]*", text, re.I)
-    return text[match.end():] if match else None
 
 
 def caption_of(text, media):
@@ -195,13 +179,11 @@ async def _cmd_agy(raw_args: str):
 
 def _status_card():
     state, snap = store.load(), engine.snapshot()
-    triggers = store.triggers(state)
     lines = [f"{engine.MARK} agy (Antigravity)"]
     if state.get("sticky"):
         lines.append("agy mode: your messages go to agy (\"Hermes …\" and / for Hermes) · /agy_off")
     else:
-        lines.append(f"Hermes mode: agy when you start with \"{triggers[0] if triggers else 'agy'} …\", "
-                     "when you reply to agy, or /agy_on")
+        lines.append("Hermes mode: agy when you reply to agy, with /agy <message>, or /agy_on")
     if not engine.TARGET_CHAT:
         lines.append("⚠️ No chat_id setting: nothing is routed to agy (see /agy_doctor)")
     lines.append(f"Model: {store.model(state)}")
@@ -217,9 +199,8 @@ def _status_card():
         if snap["queued"]:
             busy += f" · {snap['queued']} queued"
         lines.append(busy)
-    lines.append(f"Trigger words: {', '.join(triggers) or 'none'} (/agy_words)")
     lines.append("\n/agy_on · /agy_off · /agy_new · /agy_stop · /agy_model · /agy_verbose · /agy_voice · /agy_conv · "
-                 "/agy_retry · /agy_words · /agy_doctor")
+                 "/agy_retry · /agy_doctor")
     return "\n".join(lines)
 
 
@@ -234,8 +215,7 @@ async def _cmd_on(_raw_args: str):
 async def _cmd_off(_raw_args: str):
     store.update(sticky=None)
     await engine.set_mode_banner(False)
-    trigger = (store.triggers(store.load()) or ["agy"])[0]
-    return f"↩️ Back to Hermes. agy stays reachable with \"{trigger} …\" or by replying to its messages."
+    return "↩️ Back to Hermes. agy stays reachable with /agy <message> or by replying to its messages."
 
 
 async def _cmd_new(raw_args: str):
@@ -385,23 +365,6 @@ async def _cmd_retry(_raw_args: str):
         return "Nothing to send again."
     queued = await engine.submit(engine.Job(text=last["text"]))
     return "🔁 Sent to agy again" + (" (after the current answer)." if queued else ".")
-
-
-async def _cmd_words(raw_args: str):
-    words = [w.strip(",;").lower() for w in raw_args.split()]
-    if not words:
-        current = store.triggers(store.load())
-        return (f"Trigger words: {', '.join(current) or 'none'}.\n"
-                "A message starting with one of them goes to agy (\"Jet, restart the server\").\n"
-                f"Change: /agy_words {' '.join(TRIGGER_SUGGESTIONS[:2])} · default: /agy_words reset")
-    if words == ["reset"]:
-        store.update(triggers=None)
-        return f"Trigger words: {', '.join(store.DEFAULT_TRIGGERS)}."
-    bad = [w for w in words if not _WORD.match(w)]
-    if bad:
-        return f"Invalid word: {', '.join(bad)} (letters only, 2 to 12)."
-    store.update(triggers=list(dict.fromkeys(words)))
-    return f"Trigger words: {', '.join(dict.fromkeys(words))}."
 
 
 async def _cmd_doctor(_raw_args: str):

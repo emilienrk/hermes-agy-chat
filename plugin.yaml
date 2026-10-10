@@ -1,16 +1,16 @@
 name: agy-chat
 label: agy chat
 kind: standalone
-version: 1.1.0
+version: 1.2.0
 manifest_version: 2
 author: Emilien Roukine
 license: MIT
 homepage: https://github.com/emilienrk/hermes-agy-chat
 tags: [telegram, gateway, antigravity, agy]
 description: >
-  Talk to Antigravity (agy) from Telegram as an alternative to Hermes' LLM: a
-  trigger word, a reply to agy or a sticky agy mode routes your messages to the
-  agy CLI instead of Hermes. Voice notes and files ride along, and agy gets
+  Talk to Antigravity (agy) from Telegram as an alternative to Hermes' LLM: the
+  agy mode (/agy_on), /agy <message> or a reply to agy routes your messages to
+  the agy CLI instead of Hermes. Voice notes and files ride along, and agy gets
   Hermes' memory, skills, MCP servers and a few Hermes tools through a bundled
   MCP bridge. No Hermes LLM tokens are spent on routed messages.
 requires_hermes: ">=0.21.6"

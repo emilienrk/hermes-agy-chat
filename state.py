@@ -25,7 +25,6 @@ DATA_DIR = _data_dir()
 STATE_FILE = DATA_DIR / "state.json"
 TURNS_LOG = DATA_DIR / "turns.log"
 DEFAULT_MODEL = "gemini-3.8-flash-high"
-DEFAULT_TRIGGERS = ("jet", "agy")
 DEFAULT_VOICE = "direct"
 AGY_MSGS_KEEP = 400
 LOG_TAIL_BYTES = 512 * 1024
@@ -61,10 +60,6 @@ def _save(state):
 
 def model(state):
     return state.get("model") or DEFAULT_MODEL
-
-
-def triggers(state):
-    return list(state.get("triggers") or DEFAULT_TRIGGERS)
 
 
 def voice_mode(state):

@@ -16,7 +16,6 @@ Only from the one Telegram chat you configure:
 
 | You send | Goes to |
 |---|---|
-| `jet …` / `agy …` (a trigger word first) | agy |
 | a reply to one of agy's messages | agy |
 | anything, while agy mode is on (`/agy_on`) | agy, except `/` commands and messages starting with "Hermes" |
 | `/agy <message>` | agy |
@@ -39,7 +38,6 @@ are queued and handed over together.
 | `/agy_voice [direct\|local]` | Voice notes as audio for agy, or transcribed locally |
 | `/agy_conv [n]` | Resume a past conversation |
 | `/agy_retry` | Send your last message again |
-| `/agy_words [words…]` | Trigger words (default `jet`, `agy`) |
 | `/agy_doctor` | Check every link of the chain |
 
 ## Requirements
@@ -92,7 +90,7 @@ servers (written with mode 600).
 
 ## Data
 
-Plugin state (mode, model, conversation, trigger words) and the turn log live in
+Plugin state (mode, model, conversation) and the turn log live in
 `<HERMES_HOME>/plugin-data/agy-chat/`, outside the install directory, so updates keep them.
 
 ## Development
