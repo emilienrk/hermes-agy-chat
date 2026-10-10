@@ -20,6 +20,12 @@ def main():
         print("Fetching available models...")
         print("gemini-3.8-flash-high\tGemini 3.8 Flash (High)\nclaude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)")
         return
+    if args[:1] == ["-p=/usage"]:
+        print(json.dumps({"status": "SUCCESS", "command": {"name": "usage", "data": {"groups": [
+            {"name": "Gemini Models", "buckets": [
+                {"window": "weekly", "remaining_fraction": 0.73, "reset_time": "2030-01-02T06:13:07Z"},
+                {"window": "5h", "remaining_fraction": 0.85, "reset_time": "2030-01-01T20:47:57Z"}]}]}}}))
+        return
     if args == ["--version"]:
         print("9.9.9")
         return

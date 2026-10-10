@@ -18,6 +18,7 @@ configured chat can run anything that user can. Without a chat_id setting, nothi
 """
 
 import asyncio
+import json
 import logging
 import re
 import subprocess
@@ -62,7 +63,7 @@ def register(ctx):
         ("agy-handoff", _cmd_handoff, "Hand the Hermes conversation over to agy", "[message]"),
         ("agy-back", _cmd_back, "Hand the agy conversation back to Hermes", "[message]"),
         ("agy-task", _cmd_task, "Tasks agy runs on a schedule", "[add <when> | <prompt> · rm n · run n]"),
-        ("agy-usage", _cmd_usage, "agy turns and tokens per day", ""),
+        ("agy-usage", _cmd_usage, "Antigravity quota left, and agy turns and tokens", ""),
         ("agy-doctor", _cmd_doctor, "Check the agy integration", ""),
     ):
         ctx.register_command(name, handler=handler, description=description, args_hint=hint)
@@ -470,9 +471,41 @@ def _when(iso):
 # ── usage ──
 
 async def _cmd_usage(_raw_args: str):
-    turns = await asyncio.to_thread(store.recent_turns)
-    if not turns:
-        return "No agy turn recorded."
+    quota, turns = await asyncio.gather(asyncio.to_thread(_quota), asyncio.to_thread(store.recent_turns))
+    head = f"{engine.MARK} agy usage".strip()
+    quota = "Antigravity quota left:\n" + quota if quota else "Antigravity quota: unavailable (`agy -p /usage` failed)"
+    return f"{head}\n{quota}\n\n" + (_turn_stats(turns) if turns else "No agy turn recorded.")
+
+
+def _quota():
+    """The subscription's remaining quota, as `agy -p /usage` reports it (costs nothing)."""
+    try:
+        out = subprocess.run([engine.AGY_BIN, "-p=/usage", "--output-format", "json"], capture_output=True,
+                             text=True, timeout=30, cwd=str(workspace.WORKSPACE), stdin=subprocess.DEVNULL)
+        groups = json.loads(out.stdout)["command"]["data"]["groups"]
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+        logger.warning("agy-chat: agy /usage failed", exc_info=True)
+        return ""
+    lines = []
+    for group in groups:
+        buckets = [f"{_WINDOWS.get(b.get('window'), b.get('window'))} {round(100 * float(b.get('remaining_fraction', 0)))}%"
+                   f" (reset {_local(b.get('reset_time'))})" for b in group.get("buckets", [])]
+        lines.append(f"{group.get('name', '?')}: " + " · ".join(buckets))
+    return "\n".join(lines)
+
+
+_WINDOWS = {"weekly": "week", "5h": "5 h"}
+
+
+def _local(iso):
+    try:
+        when = datetime.fromisoformat(str(iso).replace("Z", "+00:00")).astimezone(workspace.local_tz())
+    except ValueError:
+        return "?"
+    return f"{when:%H:%M}" if when.date() == workspace.local_now().date() else f"{when:%a %H:%M}"
+
+
+def _turn_stats(turns):
     today = datetime.now().date()
     rows = []
     for label, days in (("Today", 1), ("7 days", 7), ("30 days", 30)):
@@ -494,8 +527,7 @@ async def _cmd_usage(_raw_args: str):
             model = t.get("model") or "?"
             models[model] = models.get(model, 0) + int(t.get("tokens") or 0)
     by_model = " · ".join(f"{m} {n // 1000}k" for m, n in sorted(models.items(), key=lambda kv: -kv[1]))
-    head = f"{engine.MARK} agy usage".strip()
-    return f"{head}\n" + "\n".join(rows) + (f"\n\n30 days by model: {by_model}" if by_model else "")
+    return "Turns through this plugin:\n" + "\n".join(rows) + (f"\n30 days by model: {by_model}" if by_model else "")
 
 
 async def _cmd_conv(raw_args: str):

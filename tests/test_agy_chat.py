@@ -593,7 +593,10 @@ class AgentTests(Base):
         self.assertIsNone(engine._worker)
 
     async def test_usage(self):
-        self.assertEqual(await plugin._cmd_usage(""), "No agy turn recorded.")
+        usage = await plugin._cmd_usage("")
+        self.assertIn("Gemini Models: week 73% (reset ", usage)
+        self.assertIn("· 5 h 85%", usage)
+        self.assertIn("No agy turn recorded.", usage)
         store.log_turn({"model": "m1", "status": "SUCCESS", "tokens": 3000, "seconds": 90})
         store.log_turn({"model": "m1", "status": "ERROR", "tokens": 1000, "seconds": 30, "task": "digest"})
         usage = await plugin._cmd_usage("")

@@ -56,6 +56,19 @@ def configure():
 configure()
 
 
+def local_tz():
+    """Hermes' configured timezone (None: the machine's)."""
+    try:
+        from hermes_time import get_timezone
+        return get_timezone()
+    except Exception:
+        return None
+
+
+def local_now():
+    return datetime.now(local_tz()).astimezone(local_tz())
+
+
 def session_key():
     return f"agent:main:telegram:dm:{CHAT_ID}"
 
@@ -118,7 +131,7 @@ def prepare(now=None):
     summary = {"skills": 0, "mcp_servers": [], "rules_bytes": 0, "errors": []}
     for step in (_write_plugin_shell, _write_skills, _write_mcp, _write_rules):
         try:
-            step(summary, now or datetime.now().astimezone())
+            step(summary, now or local_now())
         except Exception as e:
             logger.exception("agy-chat: workspace step %s failed", step.__name__)
             summary["errors"].append(f"{step.__name__}: {e}")

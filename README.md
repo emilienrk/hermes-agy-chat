@@ -46,7 +46,7 @@ are queued and handed over together.
 | `/agy_handoff [message]` | Hand the Hermes conversation over to agy (agy mode on, seeded with the thread) |
 | `/agy_back [message]` | Back to Hermes, which gets a recap of the agy conversation |
 | `/agy_task` | List agy's scheduled tasks; `add <when> \| <prompt>`, `rm <n>`, `run <n>` |
-| `/agy_usage` | Turns, tokens and time: today, 7 and 30 days, by model |
+| `/agy_usage` | Antigravity quota left (weekly and 5-hour limits, like agy's `/usage`), then turns, tokens and time through the plugin |
 | `/agy_doctor` | Check every link of the chain |
 
 ## Scheduled tasks
