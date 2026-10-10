@@ -1,0 +1,53 @@
+name: agy-chat
+label: agy chat
+kind: standalone
+version: 1.1.0
+manifest_version: 2
+author: Emilien Roukine
+license: MIT
+homepage: https://github.com/emilienrk/hermes-agy-chat
+tags: [telegram, gateway, antigravity, agy]
+description: >
+  Talk to Antigravity (agy) from Telegram as an alternative to Hermes' LLM: a
+  trigger word, a reply to agy or a sticky agy mode routes your messages to the
+  agy CLI instead of Hermes. Voice notes and files ride along, and agy gets
+  Hermes' memory, skills, MCP servers and a few Hermes tools through a bundled
+  MCP bridge. No Hermes LLM tokens are spent on routed messages.
+requires_hermes: ">=0.21.6"
+provides_tools: []
+provides_hooks:
+  - pre_gateway_dispatch
+config_schema:
+  chat_id:
+    type: str
+    required: true
+    label: Telegram chat ID
+    description: >
+      The only Telegram chat routed to agy (your DM with the bot). agy runs
+      unsandboxed as the gateway's user: nothing is routed while this is empty.
+  user_name:
+    type: str
+    default: ""
+    label: Your name
+    description: How agy's context refers to you (default "the user").
+  agy_path:
+    type: str
+    default: ""
+    label: agy binary
+    description: "Path to the agy CLI (default: agy on PATH, else ~/.local/bin/agy)."
+  workspace:
+    type: str
+    default: "~/agy-chat"
+    description: agy's working directory (inbox, outbox, generated .agents customizations).
+  default_model:
+    type: str
+    default: ""
+    description: "agy model used until /agy_model picks another (default: gemini-3.8-flash-high)."
+  machine_notes:
+    type: str
+    default: ""
+    description: Free text about the machine added to agy's context (services, caveats…).
+  skip_skills:
+    type: list
+    default: []
+    description: Hermes skill names hidden from agy.

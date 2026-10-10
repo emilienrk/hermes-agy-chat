@@ -1,0 +1,12 @@
+[project]
+name = "hermes-agy-chat"
+version = "1.1.0"
+description = "Talk to Antigravity (agy) from Telegram through Hermes Agent"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Emilien Roukine" }]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/emilienrk/hermes-agy-chat"
