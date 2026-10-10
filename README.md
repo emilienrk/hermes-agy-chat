@@ -20,6 +20,7 @@ Only from the one Telegram chat you configure:
 | You send | Goes to |
 |---|---|
 | a reply to one of agy's messages | agy |
+| `/agy_btw <question>`, or a reply to a btw answer | agy's side conversation (see `/agy_btw`) |
 | anything, while agy mode is on (`/agy_on`) | agy, except `/` commands and messages starting with "Hermes" |
 | `/agy <message>` | agy |
 | anything else | Hermes, as usual |
@@ -43,7 +44,7 @@ are queued and handed over together.
 | `/agy_voice reply [off\|mirror\|always]` | agy's answer as a voice note too (mirror: when you sent one) |
 | `/agy_conv [n]` | Resume a past conversation |
 | `/agy_retry` | Send your last message again |
-| `/agy_btw <question>` | Side question, answered right away even while agy works, in its own conversation (seeded with the main one's last exchanges, on the model's `low` variant). Reply to its answer to keep that side conversation going |
+| `/agy_btw <question>` | Side question, answered right away even while agy works, in a separate conversation that knows the main one's last exchanges. Reply to its answer to continue it |
 | `/agy_handoff [message]` | Hand the Hermes conversation over to agy (agy mode on, seeded with the thread) |
 | `/agy_back [message]` | Back to Hermes, which gets a recap of the agy conversation |
 | `/agy_task` | List agy's scheduled tasks; `add <when> \| <prompt>`, `rm <n>`, `run <n>` |
@@ -59,7 +60,8 @@ unattended; its answer arrives in Telegram. agy can also schedule its own tasks 
 Hermes keeps the schedule: each task is a Hermes cron job in `no_agent` mode whose script, generated
 under `<HERMES_HOME>/scripts/agy-tasks/`, runs agy. So it costs no Hermes LLM tokens, it shows up in
 `hermes cron list`, and a failed run is reported like any cron failure. `when` takes Hermes' schedule
-forms: `every day at 8am`, `weekdays at 7am`, `0 7 * * 1-5`, `every 6h`, `in 2h` (once).
+forms: `every day at 8am`, `weekdays at 7am`, `0 7 * * 1-5`, `every 6h`, `in 2h` (once). Times are
+read in Hermes' timezone (`timezone` in `config.yaml`; empty means the machine's, often UTC).
 
 ## Requirements
 
@@ -75,12 +77,23 @@ hermes config set plugins.entries.agy-chat.settings.chat_id <your Telegram chat 
 hermes config set plugins.entries.agy-chat.settings.user_name <your name>
 ```
 
+`chat_id` is your private chat with the bot, whose id is your Telegram user id: the one already in
+Hermes' `TELEGRAM_ALLOWED_USERS`, or ask [@userinfobot](https://t.me/userinfobot).
+
 Then:
 
 1. Add agy's workspace (`~/agy-chat` by default) to `trustedWorkspaces` in
    `~/.gemini/antigravity-cli/settings.json`, so agy loads the generated rules and MCP servers.
-2. Optionally, put the commands in Telegram's `/` menu: add `agy`, `agy_on`, `agy_off`, … to
-   `platforms.telegram.extra.command_menu.priority` in `config.yaml`.
+2. Optionally, put the commands in Telegram's `/` menu, in `config.yaml`:
+   ```yaml
+   platforms:
+     telegram:
+       extra:
+         command_menu:
+           priority: [agy, agy_on, agy_off, agy_new, agy_stop, agy_model, agy_effort, agy_verbose,
+                      agy_voice, agy_conv, agy_retry, agy_btw, agy_handoff, agy_back, agy_task,
+                      agy_usage, agy_doctor]
+   ```
 3. Restart the gateway, then send `/agy_doctor` in Telegram.
 
 Update with `hermes plugins update agy-chat`, then restart the gateway.
@@ -107,7 +120,7 @@ Under `plugins.entries.agy-chat.settings` in `config.yaml` (also editable in the
 | **Voice** | | |
 | `voice_input` | `direct` | `direct`: the audio goes to agy (Google); `local`: Hermes' Whisper transcribes it first. |
 | `voice_reply` | `off` | `off`, `mirror` (voice answer when you sent a voice note), `always`. |
-| `tts_provider` | `""` | `""`: Hermes' TTS settings; `edge`: Edge TTS directly (free, no key), whatever Hermes uses. |
+| `tts_provider` | `""` | `""`: Hermes' TTS settings; `edge`: Edge TTS directly (free, no key; needs `edge-tts` ≥ 7.2.8 in Hermes' venv, older ones get a 403). |
 | `tts_voice` | Hermes' `tts.edge.voice` | Edge voice, e.g. `fr-FR-DeniseNeural`. |
 | **What agy gets from Hermes** | | |
 | `share_soul`, `share_memory`, `share_thread` | `true` | Personality, memory, recent Telegram thread, in agy's context. |
